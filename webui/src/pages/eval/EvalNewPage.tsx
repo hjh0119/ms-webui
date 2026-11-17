@@ -31,10 +31,12 @@ function itemSummary(items: EvalItem[]): string {
     .join(' ');
 }
 
-/* 存档任务（datasetArgs 形态）→ 表单项（subsets 形态）的回显归一 */
+/* 存档任务（datasetArgs 形态）→ 表单项（subsets 形态）的回显归一。
+ * 落盘键是 EvalScope 的 subset_list；旧误键 subsets 的存档也认（回显不丢）。 */
 function fromStoredItem(it: EvalItem): EvalItem {
-  const inner = (it.datasetArgs as Record<string, { subsets?: unknown }> | undefined)?.[it.dataset];
-  const subs = inner && Array.isArray(inner.subsets) ? inner.subsets.map(String) : undefined;
+  const inner = (it.datasetArgs as Record<string, { subset_list?: unknown; subsets?: unknown }> | undefined)?.[it.dataset];
+  const raw = inner?.subset_list ?? inner?.subsets;
+  const subs = Array.isArray(raw) ? raw.map(String) : undefined;
   return {
     dataset: it.dataset,
     ...(it.limit ? { limit: it.limit } : {}),
@@ -222,13 +224,14 @@ export function EvalNewPage() {
     setItems((prev) => prev.map((it) => (it.dataset === name ? { ...it, subsets: undefined } : it)));
 
   /*
-   * 部分勾选子集时的 dataset_args 形态（EvalScope 的 {dataset: {subsets: [...]}}）。
-   * 全选不传——整集评测与显式列全部子集在 EvalScope 语义上等价，省一个参数。
+   * 部分勾选子集时的 dataset_args 形态（EvalScope 的 {dataset: {subset_list: [...]}}）。
+   * 键名必须是 subset_list：BenchmarkMeta._update 对未知键静默丢弃，写 subsets
+   * 会不报错地评全集。全选不传——整集评测与显式列全部子集语义等价，省一个参数。
    */
   const argsOf = (it: EvalItem): Record<string, unknown> | undefined => {
     const all = datasets.find((d) => d.name === it.dataset)?.subsets;
     if (it.subsets?.length && all && it.subsets.length < all.length) {
-      return { [it.dataset]: { subsets: it.subsets } };
+      return { [it.dataset]: { subset_list: it.subsets } };
     }
     return undefined;
   };

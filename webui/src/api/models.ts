@@ -474,48 +474,53 @@ export async function streamChat(
           done = true;
           break;
         }
+        /* parse 单独包：下面的裸 catch 只容「半个 JSON」，业务错误（上游
+         * 错误 chunk）若也在同一 try 里抛会被它吞掉，修复变 no-op */
+        type Delta = { reasoning_content?: unknown; content?: unknown; tool_calls?: unknown };
+        let chunk: { error?: unknown; choices?: { finish_reason?: unknown; delta?: Delta }[] };
         try {
-          const chunk = JSON.parse(payload);
-          /* OpenAI 形态的流式错误 chunk（上游模板/引擎错误经网关转成 {"error":{message,type}}）：
-           * 不在此抛出的话，它会因没有 choices 被当成空 chunk 静默吞掉，观感又是「空流」 */
-          const errObj = (chunk as { error?: unknown }).error;
-          if (errObj) {
-            const msg = typeof errObj === 'object' && errObj !== null && 'message' in errObj
-              ? String((errObj as { message?: unknown }).message)
-              : String(errObj);
-            throw new Error(tStatic('api.upstreamStreamError', { msg }));
-          }
-          const choice = chunk.choices?.[0] ?? {};
-          if (typeof choice.finish_reason === 'string' && choice.finish_reason) finishReason = choice.finish_reason;
-          const delta = choice.delta ?? {};
-          const reasoning = typeof delta.reasoning_content === 'string' ? delta.reasoning_content : '';
-          const content = typeof delta.content === 'string' ? delta.content : '';
-          /* 标准通道分片拼装（缺 index 的退化流一律当第 0 个调用） */
-          if (Array.isArray(delta.tool_calls)) {
-            for (const tc of delta.tool_calls as {
-              index?: number;
-              id?: unknown;
-              function?: { name?: unknown; arguments?: unknown };
-            }[]) {
-              const idx = typeof tc.index === 'number' ? tc.index : 0;
-              const slot = stdCalls.get(idx) ?? { id: '', name: '', args: '' };
-              if (typeof tc.id === 'string' && tc.id) slot.id = tc.id;
-              if (typeof tc.function?.name === 'string' && tc.function.name) slot.name = tc.function.name;
-              if (typeof tc.function?.arguments === 'string') slot.args += tc.function.arguments;
-              stdCalls.set(idx, slot);
-            }
-          }
-          const parts = splitter.feed(reasoning, content);
-          const tOut = toolSplitter.feed(parts.content);
-          if (parts.reasoning || tOut.content) {
-            onDelta({ content: tOut.content, reasoning: parts.reasoning });
-          }
-          if (tOut.toolCalls?.length) {
-            toolCalls.push(...tOut.toolCalls);
-            onDelta({ content: '', reasoning: '', toolCalls: tOut.toolCalls });
-          }
+          chunk = JSON.parse(payload);
         } catch {
           /* 半个 JSON 事件留在下一轮处理；非 JSON 的心跳行直接跳过 */
+          continue;
+        }
+        /* OpenAI 形态的流式错误 chunk（上游模板/引擎错误经网关转成 {"error":{message,type}}）：
+         * 不在此抛出的话，它会因没有 choices 被当成空 chunk 静默吞掉，观感又是「空流」 */
+        const errObj = chunk.error;
+        if (errObj) {
+          const msg = typeof errObj === 'object' && errObj !== null && 'message' in errObj
+            ? String((errObj as { message?: unknown }).message)
+            : String(errObj);
+          throw new Error(tStatic('api.upstreamStreamError', { msg }));
+        }
+        const choice: { finish_reason?: unknown; delta?: Delta } = chunk.choices?.[0] ?? {};
+        if (typeof choice.finish_reason === 'string' && choice.finish_reason) finishReason = choice.finish_reason;
+        const delta: Delta = choice.delta ?? {};
+        const reasoning = typeof delta.reasoning_content === 'string' ? delta.reasoning_content : '';
+        const content = typeof delta.content === 'string' ? delta.content : '';
+        /* 标准通道分片拼装（缺 index 的退化流一律当第 0 个调用） */
+        if (Array.isArray(delta.tool_calls)) {
+          for (const tc of delta.tool_calls as {
+            index?: number;
+            id?: unknown;
+            function?: { name?: unknown; arguments?: unknown };
+          }[]) {
+            const idx = typeof tc.index === 'number' ? tc.index : 0;
+            const slot = stdCalls.get(idx) ?? { id: '', name: '', args: '' };
+            if (typeof tc.id === 'string' && tc.id) slot.id = tc.id;
+            if (typeof tc.function?.name === 'string' && tc.function.name) slot.name = tc.function.name;
+            if (typeof tc.function?.arguments === 'string') slot.args += tc.function.arguments;
+            stdCalls.set(idx, slot);
+          }
+        }
+        const parts = splitter.feed(reasoning, content);
+        const tOut = toolSplitter.feed(parts.content);
+        if (parts.reasoning || tOut.content) {
+          onDelta({ content: tOut.content, reasoning: parts.reasoning });
+        }
+        if (tOut.toolCalls?.length) {
+          toolCalls.push(...tOut.toolCalls);
+          onDelta({ content: '', reasoning: '', toolCalls: tOut.toolCalls });
         }
       }
     }

@@ -1308,7 +1308,8 @@ function publicEvalTask(t: EvalTask) {
  * 结果缓存在模块变量里——注册表随安装版本固定，不需要每请求重探。
  * description 截首个正文段（Overview 标题后的第一段，限 400 字）；subsets 是
  * 评测集的子集清单（如 ceval 的 52 个科目），供前端勾选后经 eval_dataset_args
- * 的 {dataset: {subsets: [...]}} 形态下传。
+ * 的 {dataset: {subset_list: [...]}} 形态下传（键名必须是 subset_list，
+ * EvalScope 对未知键静默丢弃）。
  */
 let evalDatasetsCache: { name: string; prettyName: string; tags: string[]; metrics: string[]; description?: string; subsets?: string[] }[] | null = null;
 
@@ -6504,8 +6505,8 @@ if (req.method === 'POST' && !seg0) {
             /*
              * 助手单流历史（与模型无关）：读 '*' 桶；无 '*' 桶且有旧分桶时
              * 一次性迁移——按插入序合并进 '*' 并落盘，助手续聊旧会话不丢
-             * 历史。只由助手侧调用（fetchConvHistory），首页对账不走这里，
-             * 对比模式的各列独立桶不会被误合并。多桶并存时合并顺序无时间戳
+             * 历史。原分桶必须保留：助手下拉列全部会话（含首页对比会话），
+             * 替换式落盘会把对比各列的历史删掉。多桶并存时合并顺序无时间戳
              * 可依，取对象插入序（助手旧会话通常仅一个非空桶）。
              */
             const current = readConvs();
@@ -6519,7 +6520,7 @@ if (req.method === 'POST' && !seg0) {
             if (!buckets['*']?.length) {
               const legacy = Object.entries(buckets).filter(([, msgs]) => msgs.length);
               if (legacy.length) {
-                buckets = { '*': legacy.flatMap(([, msgs]) => msgs) };
+                buckets = { ...buckets, '*': legacy.flatMap(([, msgs]) => msgs) };
                 writeConvs(current.chats, { ...current.turns, [conv]: buckets });
               }
             }

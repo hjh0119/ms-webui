@@ -282,11 +282,11 @@ export function TrainNewPage() {
         }
         /* rl_type 是独立选择器管的，不进 params 表单面 */
         delete known.rl_type;
-        /* adapters 是页面顶层字段（同 model/tuner），不进 ALL_PARAMS，单独回填 */
-        if (typeof src.params.adapters === 'string' && src.params.adapters) setParam('adapters', src.params.adapters);
-        /* 身份字段同 adapters（联动字段不在 ALL_PARAMS 清单里，模板克隆单独回填） */
-        for (const k of ['model_name', 'model_author'] as const) {
-          if (typeof src.params[k] === 'string' && src.params[k]) setParam(k, src.params[k]);
+        /* adapters/model_name/model_author 是联动字段（不在 ALL_PARAMS 清单），
+         * 必须并进 known 一起回填：setParams(known) 是整体替换，先单独 setParam
+         * 会被它按批处理顺序抹掉。 */
+        for (const k of ['adapters', 'model_name', 'model_author'] as const) {
+          if (typeof src.params[k] === 'string' && src.params[k]) known[k] = src.params[k];
         }
         setParams(known);
         setExtraArgs(src.extraArgs ?? '');
