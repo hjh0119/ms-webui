@@ -1353,6 +1353,7 @@ export const en: Partial<MessageTable> = {
   'api.requestFailed': 'Request failed: {status}',
   'api.stallHeaders': 'Upstream {model} returned no response within {seconds}s (connection blackholed). Please resend this message.',
   'api.stallChunk': 'Upstream {model} stream stalled: no data for {minutes} min (link appears dead). Received content is kept; please resend to continue.',
+  'api.upstreamStreamError': 'Upstream generation failed: {msg}',
   'api.toolCallFailed': 'Tool call failed: {status}',
   'api.cmdExecFailed': 'Command execution failed: {status}',
   'api.skillListFailed': 'Failed to read the skill list: {status}',

@@ -1354,6 +1354,7 @@ export const zh = {
   'api.requestFailed': '请求失败: {status}',
   'api.stallHeaders': '上游 {model} {seconds}s 内未返回任何响应（连接疑似被黑洞），请重发本条消息',
   'api.stallChunk': '上游 {model} 流中断：{minutes} 分钟无新数据（链路疑似已死），已收内容不丢，请重发继续',
+  'api.upstreamStreamError': '上游生成失败：{msg}',
   'api.toolCallFailed': '工具调用失败: {status}',
   'api.cmdExecFailed': '命令执行失败: {status}',
   'api.skillListFailed': '读取技能清单失败: {status}',

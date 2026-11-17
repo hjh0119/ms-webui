@@ -66,7 +66,8 @@ export async function saveModel(config: ModelConfig): Promise<void> {
 
 export async function deleteModel(id: string): Promise<void> {
   const res = await fetch(`${apiBase()}/api/models?id=${encodeURIComponent(id)}`, { method: 'DELETE' });
-  if (!res.ok) throw new Error(tStatic('api.deleteFailed', { status: res.status }));
+  // 服务端拒绝文案要透传（如活部署 409「请先在部署页停止」），与 saveModel 同口径
+  if (!res.ok) throw new Error((await res.json()).error ?? tStatic('api.deleteFailed', { status: res.status }));
 }
 
 /*
@@ -475,6 +476,15 @@ export async function streamChat(
         }
         try {
           const chunk = JSON.parse(payload);
+          /* OpenAI 形态的流式错误 chunk（上游模板/引擎错误经网关转成 {"error":{message,type}}）：
+           * 不在此抛出的话，它会因没有 choices 被当成空 chunk 静默吞掉，观感又是「空流」 */
+          const errObj = (chunk as { error?: unknown }).error;
+          if (errObj) {
+            const msg = typeof errObj === 'object' && errObj !== null && 'message' in errObj
+              ? String((errObj as { message?: unknown }).message)
+              : String(errObj);
+            throw new Error(tStatic('api.upstreamStreamError', { msg }));
+          }
           const choice = chunk.choices?.[0] ?? {};
           if (typeof choice.finish_reason === 'string' && choice.finish_reason) finishReason = choice.finish_reason;
           const delta = choice.delta ?? {};

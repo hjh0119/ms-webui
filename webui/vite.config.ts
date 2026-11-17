@@ -2,7 +2,7 @@ import { defineConfig, type Plugin } from 'vite';
 import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
 import { fileURLToPath, URL } from 'node:url';
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join, resolve, sep, dirname, extname, relative } from 'node:path';
 import { Readable } from 'node:stream';
 import { StringDecoder } from 'node:string_decoder';
@@ -1111,6 +1111,8 @@ interface DeployTask {
   plugins?: string[];
   /** LoRA adapter（--adapters）：训练产出的 checkpoint 目录，支持 name=path 形态 */
   adapters?: string[];
+  /** 合并单个 LoRA 进权重后部署（--merge_lora true）：启动时现场合并，请求免 adapter 路由 */
+  mergeLora?: boolean;
   /** 「将要执行」直写的附加参数原文（spawn 时 tokenize 追加） */
   extraArgs?: string;
 }
@@ -1131,6 +1133,20 @@ function pickFreePort(from: number): Promise<number> {
     tryPort(from);
     setTimeout(() => reject(new Error('no free port')), 8000);
   });
+}
+
+/*
+ * 每个部署任务独立的 Ray 会话根（RAY_TMPDIR）：ray.init() 不带 address 时会读
+ * /tmp/ray/ray_current_cluster 自动连上本机已有集群，此后 Serve 的监听端口由首个
+ * 集群定死，表单选的端口被静默忽略（引擎在旧端口服务，网关与就绪探测仍按新
+ * 端口转发，三层错位，部署永远卡「启动中」）。独立 tempdir 让 Ray 找不到已有
+ * 集群、起本部署自己的进程内集群——端口字段恢复真实有效，多部署互不干扰，
+ * 与「每部署一独立进程」的既有形态一致。
+ */
+function rayTmpDir(id: string): string {
+  /* 前缀务必短：Ray 在这个根下再拼 ray/session_<时间戳_微秒_pid>/sockets/plasma_store
+     （固定 ~69 字符），AF_UNIX 路径上限 107，长前缀会直接 OSError 起不了集群 */
+  return join(tmpdir(), `ray-wd-${id}`);
 }
 
 /*
@@ -1167,6 +1183,12 @@ async function waitUntilReady(task: DeployTask & { proc?: ChildProcess }): Promi
       /* not up yet */
     }
     await new Promise((r) => setTimeout(r, 2000));
+  }
+  /* 15 分钟仍未就绪：显式置失败，不再无限「启动中」——日志点名探测端口，
+     看得到状态才能排因；进程保留，慢启动的大模型仍可人工判断后停止 */
+  if (task.status === 'starting') {
+    task.status = 'failed';
+    pushLog(task, `[webui] 端口 ${task.port} 15 分钟内未就绪，部署判为失败；查看上方日志排因，无用则停止任务释放显卡`);
   }
 }
 
@@ -3438,6 +3460,7 @@ function startDeployTask(body: {
   engine?: string;
   port?: number;
   adapters?: unknown;
+  mergeLora?: unknown;
 }) {
   const model = String(body.model ?? '').trim();
   if (!model) throw new Error('model is required');
@@ -3445,11 +3468,23 @@ function startDeployTask(body: {
   const servedName =
     String(body.servedName ?? '').trim() || model.split('/').pop() || model;
   /* 前端传数组，避免空格拆分歧义（路径含空格不炸） */
-  const adapters = (Array.isArray(body.adapters) ? body.adapters : [])
+  const rawAdapters = (Array.isArray(body.adapters) ? body.adapters : [])
     .map((a: unknown) => String(a ?? '').trim())
     .filter(Boolean);
+  const mergeLora = body.mergeLora === true;
+  /*
+   * 单个无命名的 adapter 直挂时把 served 名给它：部署页选 ckpt 的主场景下，
+   * 用户（对话页下拉同源）拿 served 名请求就应该路由到 LoRA——不命名时 CLI
+   * 默认名 adapter-1 无人知晓，served 名会静默落到裸底座条目。多 adapter 或
+   * 用户已手填 name=path 时保持原样；merge_lora 形态下 adapter 名无意义（合
+   * 并进权重，不走请求期路由）也不动。
+   */
+  const adapters =
+    !mergeLora && rawAdapters.length === 1 && !rawAdapters[0].includes('=')
+      ? [`${servedName}=${rawAdapters[0]}`]
+      : rawAdapters;
   const id = `deploy-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
-  return { id, model, engine, servedName, adapters };
+  return { id, model, engine, servedName, adapters, mergeLora };
 }
 
 /**
@@ -3810,6 +3845,37 @@ function swiftApiPlugin(): Plugin {
           }
           if (req.method === 'DELETE') {
             const id = url.searchParams.get('id');
+            /*
+             * 活部署禁删登记：重启收编（adoptOrphanDeploys）以 models.json 的
+             * 部署登记为唯一线索找孤儿进程——进程活着时删掉登记，重启后该部署
+             * 在模型页/部署页都不可见，永久占卡。starting 也算活（进程已 spawn）。
+             * 任务表查不到时再探活一次（收编漏网/手工登记的同后果）；探不活
+             * 的死部署放行删除——那正是残留登记的清理路径。
+             */
+            const entry = loadModels().find((m) => m.id === id);
+            if (entry?.note === 'swift 部署') {
+              let alive = [...deployTasks.values()].some(
+                (t) => t.servedName === id && (t.status === 'running' || t.status === 'starting'),
+              );
+              if (!alive) {
+                try {
+                  const probe = await fetch(`${entry.baseUrl.replace(/\/+$/, '')}/models`, {
+                    signal: AbortSignal.timeout(1500),
+                  });
+                  alive = probe.ok;
+                } catch {
+                  /* 超时 / 拒连 = 死部署，放行 */
+                }
+              }
+              if (alive) {
+                res.statusCode = 409;
+                res.setHeader('Content-Type', 'application/json');
+                res.end(JSON.stringify({
+                  error: '该模型是活部署：请先在部署页停止，再删除登记（直接删除会让进程脱离管理、继续占用 GPU）',
+                }));
+                return;
+              }
+            }
             saveModels(loadModels().filter((m) => m.id !== id));
             res.setHeader('Content-Type', 'application/json');
             res.end(JSON.stringify({ ok: true }));
@@ -3965,7 +4031,7 @@ function swiftApiPlugin(): Plugin {
           }
           if (req.method === 'POST' && !taskId) {
             const body = await readJsonBody(req);
-            const { id, model, engine, servedName, adapters } = startDeployTask(body);
+            const { id, model, engine, servedName, adapters, mergeLora } = startDeployTask(body);
             const port = Number(body.port) > 0 ? Number(body.port) : await pickFreePort(8100);
             /*
              * 显卡分配两模式：本机选卡的卡号列表进 CUDA_VISIBLE_DEVICES；
@@ -4020,6 +4086,7 @@ function swiftApiPlugin(): Plugin {
               ...(gpuCount ? { gpuCount } : {}),
               ...(plugins.length ? { plugins } : {}),
               ...(adapters.length ? { adapters } : {}),
+              ...(mergeLora ? { mergeLora: true } : {}),
               ...(extraArgs.length ? { extraArgs: String(body.extraArgs).trim() } : {}),
             };
             deployTasks.set(id, task);
@@ -4030,6 +4097,8 @@ function swiftApiPlugin(): Plugin {
               '--served_model_name', servedName,
               /* 多 adapter 直出多个值（HfArgumentParser nargs），name=path 语法由 config 层统一解析 */
               ...(adapters.length ? ['--adapters', ...adapters] : []),
+              /* 合并单个 adapter 进权重：启动时现场合并，请求不走 adapter 路由 */
+              ...(mergeLora ? ['--merge_lora', 'true'] : []),
               '--port', String(port),
               ...(nproc > 1 ? ['--nproc_per_node', String(nproc)] : []),
               ...(plugins.length ? ['--external_plugins', ...plugins] : []),
@@ -4040,6 +4109,10 @@ function swiftApiPlugin(): Plugin {
               env: {
                 ...spawnEnv(),
                 USE_SWIFT_V5: '1',
+                /* 独立 Ray 集群（见 rayTmpDir）；日志实时：Python 对管道输出全缓冲，
+                   不设这个部署日志要等进程退出才一次性可见 */
+                PYTHONUNBUFFERED: '1',
+                RAY_TMPDIR: rayTmpDir(id),
                 ...(gpus?.length ? { CUDA_VISIBLE_DEVICES: gpus.join(',') } : {}),
               },
               stdio: ['ignore', 'pipe', 'pipe'],
@@ -4072,6 +4145,13 @@ function swiftApiPlugin(): Plugin {
                 if (code !== 0) pushLog(task, `[webui] deploy process exited with code ${code}`);
               }
               unregisterDeployedModel(task);
+              /* 进程已死：它的进程内 Ray 集群（RAY_TMPDIR）随之终结，清掉会话
+                 残留（/tmp 小盘，多部署累积会挤爆） */
+              try {
+                rmSync(rayTmpDir(task.id), { recursive: true, force: true });
+              } catch {
+                /* best effort */
+              }
               const { proc: _proc, log: _log, ...deploySnapshot } = task;
               recordHistory('deploy', deploySnapshot as Record<string, unknown>);
             });

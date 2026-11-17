@@ -30,6 +30,8 @@ export interface DeployTaskInfo {
   plugins?: string[];
   /** LoRA adapter（--adapters）：训练产出的 checkpoint 目录，支持 name=path 形态 */
   adapters?: string[];
+  /** 合并单个 LoRA 进权重后部署（--merge_lora true）：启动时现场合并，请求免 adapter 路由 */
+  mergeLora?: boolean;
   /** 「将要执行」直写的附加参数原文（spawn 时 tokenize 追加） */
   extraArgs?: string;
 }
@@ -66,8 +68,10 @@ export async function startDeploy(input: {
   gpuCount?: number;
   /** 插件来源（--external_plugins） */
   plugins?: string[];
-  /** LoRA adapter（--adapters）：训练产出的 checkpoint 目录，支持 name=path 形态，多个即多 adapter */
+  /** LoRA adapter（--adapters）：训练产出的 checkpoint 目录，支持 name=path 形 态，多个即多 adapter */
   adapters?: string[];
+  /** 合并单个 LoRA 进权重后部署（--merge_lora true）；与 adapters 直挂二选一 */
+  mergeLora?: boolean;
   /** 「将要执行」直写的附加参数原文（按空白切分追加，引号包裹保留空格） */
   extraArgs?: string;
 }): Promise<string> {
