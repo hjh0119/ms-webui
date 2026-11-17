@@ -16,6 +16,10 @@ export interface EvalDatasetInfo {
   prettyName: string;
   tags: string[];
   metrics: string[];
+  /** 首段描述（Overview 段，已服务端截断），帮助理解评测集考什么 */
+  description?: string;
+  /** 子集清单（如 ceval 的 52 个科目）；单名义子集（default/main）时 UI 不展示选择 */
+  subsets?: string[];
 }
 
 /** 一个评测集及其采样设置 */
@@ -23,7 +27,9 @@ export interface EvalItem {
   dataset: string;
   /** 只评前 N 条；undefined = 全量 */
   limit?: number;
-  /** 逐集 dataset_args（subset_list 版本透传等）：JSON 序列化进 --eval_dataset_args */
+  /** 选中的子集清单（全选时不设）；提交时组装进 datasetArgs */
+  subsets?: string[];
+  /** 逐集 dataset_args（subset 选择的结果形态）：JSON 序列化进 --eval_dataset_args */
   datasetArgs?: Record<string, unknown>;
 }
 

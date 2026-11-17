@@ -126,6 +126,8 @@ export function homeTools({ userRequest, onPendingCreate, conv, model }: HomeToo
     '训练',
     '新建训练任务：准备新建训练页的预填表单（模型/数据集/训练方式等），回复区出现「前往查看」按钮，用户点击后跳转，提交由用户完成。' +
       '训练旋钮（学习率、epoch 等）放 params，key 即 CLI flag 名。' +
+      '数据集含 self-cognition 时 params 必须带 model_name（模型自称的名字，问用户想要什么身份）与 model_author（开发者/作者名），' +
+      '不传则训练数据里的 {{NAME}}/{{AUTHOR}} 占位符不会替换，训不出自我认知。' +
       '要一次启动多个训练（消融实验）请改用 start_train_batch',
     {
       type: 'object',
@@ -185,7 +187,7 @@ export function homeTools({ userRequest, onPendingCreate, conv, model }: HomeToo
             name: { type: 'string', description: '实验组名（可选，会作为每个任务显示名的公共前缀，如 lr-sweep）' },
             base: {
               type: 'object',
-              description: '所有实验共享的基础配置，字段与 create_train 相同：model/datasets/val_datasets/task_type/rl_type/tuner/params/gpus',
+              description: '所有实验共享的基础配置，字段与 create_train 相同：model/datasets/val_datasets/task_type/rl_type/tuner/params/gpus；数据集含 self-cognition 时 params 须带 model_name 与 model_author（身份占位符替换）',
             },
             experiments: {
               type: 'array',

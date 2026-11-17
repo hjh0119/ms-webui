@@ -5,11 +5,12 @@ import { toast } from 'sonner';
 import { ConfigFormShell } from '@/components/ConfigFormShell';
 import type { ConfigField } from '@/components/PageAssistant';
 import { Field, FieldStack, NumberInput, SegmentedControl, SelectInput } from '@/components/FormField';
-import { TagInput, type SearchOption } from '@/components/SearchSelect';
+import { SearchSelect, TagInput, type SearchOption } from '@/components/SearchSelect';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { MODULES } from '@/theme/modules';
 import { listModels, type ModelConfig } from '@/api/models';
+import { listCatalog, modelOption, listCkptCatalog, ckptOption, ckptPick, type CatalogEntry, type CkptEntry } from '@/api/catalog';
 import { listPlugins } from '@/api/plugins';
 import {
   listEvalDatasets,
@@ -30,10 +31,22 @@ function itemSummary(items: EvalItem[]): string {
     .join(' ');
 }
 
+/* 存档任务（datasetArgs 形态）→ 表单项（subsets 形态）的回显归一 */
+function fromStoredItem(it: EvalItem): EvalItem {
+  const inner = (it.datasetArgs as Record<string, { subsets?: unknown }> | undefined)?.[it.dataset];
+  const subs = inner && Array.isArray(inner.subsets) ? inner.subsets.map(String) : undefined;
+  return {
+    dataset: it.dataset,
+    ...(it.limit ? { limit: it.limit } : {}),
+    ...(subs?.length ? { subsets: subs } : {}),
+  };
+}
+
 /**
  * 新建评测。被测模型只能选模型配置（models.json）里的条目——评测走 swift eval
  * 的 api 模式（--eval_url 指向该条目的端点），本地不加载任何模型。评测集来自
- * EvalScope 的数据集注册表（可搜索），每个集可独立设「只评前 N 条」。
+ * EvalScope 的数据集注册表（可搜索）；选中即展开首段描述与子集勾选（部分勾选
+ * 经 --eval_dataset_args 下传），每集可独立设「只评前 N 条」。
  */
 export function EvalNewPage() {
   const { t } = useT();
@@ -43,7 +56,7 @@ export function EvalNewPage() {
   const [models, setModels] = useState<ModelConfig[]>([]);
   const [datasets, setDatasets] = useState<EvalDatasetInfo[]>([]);
   const [modelId, setModelId] = useState('');
-  /** 搜索关键词过滤 207 个基准 */
+  /** 搜索关键词过滤 290 个基准 */
   const [query, setQuery] = useState('');
   /** 选中项的 limit（key = dataset name；undefined = 全量） */
   const [items, setItems] = useState<EvalItem[]>([]);
@@ -59,6 +72,12 @@ export function EvalNewPage() {
   const [baseModel, setBaseModel] = useState('');
   const [adapters, setAdapters] = useState('');
   const [gpus, setGpus] = useState('');
+  /* 本地直评底座候选：注册表模型 + 本机训练 ckpt；ckpt 另存 map 供选中联动 */
+  const [baseOptions, setBaseOptions] = useState<SearchOption[]>([]);
+  const [ckptMap, setCkptMap] = useState<Record<string, CkptEntry>>({});
+  /* 选中 ckpt 的回显名（「底座:断点名」，与部署页同病同修）：底座字段落到的是
+   * 底座名，回显 value 分不出选的是哪个断点——SearchSelect 的 display 覆盖 */
+  const [pickedCkpt, setPickedCkpt] = useState('');
 
   useEffect(() => {
     listModels()
@@ -67,6 +86,17 @@ export function EvalNewPage() {
         setModelId((prev) => prev || configs[0]?.id || '');
       })
       .catch((e) => toast.error(String(e)));
+    /*
+     * 本地直评底座候选一次装配：注册表模型与本机 ckpt 两路到齐拼接，ckpt 排前
+     * （空关键词截前 50）；先行各自 set 会互相覆盖。失败退空数组不拦另一路。
+     */
+    void Promise.all([
+      listCatalog().then((c) => c.models).catch(() => [] as CatalogEntry[]),
+      listCkptCatalog(),
+    ]).then(([models, ckpts]) => {
+      setBaseOptions([...ckpts.map(ckptOption), ...models.map(modelOption)]);
+      setCkptMap(Object.fromEntries(ckpts.map((c) => [c.path, c])));
+    });
     listEvalDatasets()
       .then(setDatasets)
       .catch((e) => toast.error(String(e)));
@@ -76,6 +106,22 @@ export function EvalNewPage() {
         /* 清单不可达：TagInput 仍接受自由输入 */
       });
   }, []);
+
+  /*
+   * 底座选中入口：命中本机训练 ckpt 时联动填表——full 断点 baseModel 直接填
+   * 路径；LoRA 断点 baseModel 填底座、adapters 填路径。后改不自动清 adapters。
+   */
+  const pickBaseModel = (v: string) => {
+    const hit = ckptPick(ckptMap, v);
+    if (hit) {
+      setBaseModel(hit.model);
+      setPickedCkpt(ckptOption(ckptMap[v]).label ?? '');
+      if (hit.adapters) setAdapters(hit.adapters);
+      return;
+    }
+    setPickedCkpt('');
+    setBaseModel(v);
+  };
 
   /*
    * 「以此为模板新建」入口：?from=<任务 id> 预填被测模型与评测集（含每集的
@@ -92,7 +138,8 @@ export function EvalNewPage() {
         const src = tasks.find((x) => x.id === from);
         if (!src) return;
         setModelId(src.modelId);
-        setItems(src.items.map((it) => ({ ...it })));
+        /* 兼容旧任务的 datasetArgs 形态：反解出 subsets 供表单回显 */
+        setItems(src.items.map((it) => ({ ...fromStoredItem(it) })));
         setPlugins(src.plugins ?? []);
         setExtraArgs(src.extraArgs ?? '');
       })
@@ -115,7 +162,14 @@ export function EvalNewPage() {
           .map((it) => {
             const d = String((it as Record<string, unknown>).dataset ?? '').trim();
             const limit = Number((it as Record<string, unknown>).limit);
-            return d ? { dataset: d, ...(Number.isInteger(limit) && limit > 0 ? { limit } : {}) } : null;
+            const subs = (it as Record<string, unknown>).subsets;
+            return d
+              ? {
+                  dataset: d,
+                  ...(Number.isInteger(limit) && limit > 0 ? { limit } : {}),
+                  ...(Array.isArray(subs) && subs.length ? { subsets: subs.map(String) } : {}),
+                }
+              : null;
           })
           .filter((it): it is EvalItem => !!it),
       );
@@ -146,6 +200,47 @@ export function EvalNewPage() {
     setItems((prev) =>
       prev.map((it) => (it.dataset === name ? { ...it, limit: limit && limit > 0 ? limit : undefined } : it)),
     );
+
+  /*
+   * 子集勾选：item.subsets 未设 = 全选（整集评测）；点选后存选中清单，回到全集
+   * 时归一化成未设（不传 datasetArgs）。至少保留一个——取消最后一个被忽略。
+   */
+  const toggleSubset = (name: string, sub: string) => {
+    const all = datasets.find((d) => d.name === name)?.subsets ?? [];
+    setItems((prev) =>
+      prev.map((it) => {
+        if (it.dataset !== name) return it;
+        const current = it.subsets ?? all;
+        const next = current.includes(sub) ? current.filter((s) => s !== sub) : [...current, sub];
+        if (!next.length) return it;
+        return { ...it, subsets: next.length === all.length ? undefined : next };
+      }),
+    );
+  };
+
+  const selectAllSubsets = (name: string) =>
+    setItems((prev) => prev.map((it) => (it.dataset === name ? { ...it, subsets: undefined } : it)));
+
+  /*
+   * 部分勾选子集时的 dataset_args 形态（EvalScope 的 {dataset: {subsets: [...]}}）。
+   * 全选不传——整集评测与显式列全部子集在 EvalScope 语义上等价，省一个参数。
+   */
+  const argsOf = (it: EvalItem): Record<string, unknown> | undefined => {
+    const all = datasets.find((d) => d.name === it.dataset)?.subsets;
+    if (it.subsets?.length && all && it.subsets.length < all.length) {
+      return { [it.dataset]: { subsets: it.subsets } };
+    }
+    return undefined;
+  };
+
+  /* 提交/预览共用的逐集参数尾（limit + 子集选择） */
+  const itemTail = (it: EvalItem): string => {
+    const args = argsOf(it);
+    return (
+      (it.limit ? ` \\\n    --eval_limit ${it.limit}` : '') +
+      (args ? ` \\\n    --eval_dataset_args ${JSON.stringify(args)}` : '')
+    );
+  };
 
   const model = models.find((m) => m.id === modelId);
 
@@ -180,8 +275,7 @@ export function EvalNewPage() {
         t('ev.cmdLocalNote'),
         ...items.map(
           (it) =>
-            `swift eval \\\n    --model ${baseModel.trim()}${tail} \\\n    --eval_dataset ${it.dataset}` +
-            (it.limit ? ` \\\n    --eval_limit ${it.limit}` : ''),
+            `swift eval \\\n    --model ${baseModel.trim()}${tail} \\\n    --eval_dataset ${it.dataset}` + itemTail(it),
         ),
       ].join('\n\n');
     }
@@ -199,12 +293,10 @@ export function EvalNewPage() {
           `swift eval \\` +
           `\n    --model ${model.model} \\` +
           `\n    --eval_url ${model.baseUrl} \\` +
-          `\n    --eval_dataset ${it.dataset}` +
-          (it.limit ? ` \\\n    --eval_limit ${it.limit}` : '') +
-          tail,
+          `\n    --eval_dataset ${it.dataset}` + itemTail(it) + tail,
       ),
     ].join('\n\n');
-  }, [localMode, baseModel, adapters, gpus, model, items, plugins, extraArgs, t]);
+  }, [localMode, baseModel, adapters, gpus, model, items, datasets, plugins, extraArgs, t]);
 
   const submit = async () => {
     if (localMode && !baseModel.trim()) {
@@ -223,7 +315,15 @@ export function EvalNewPage() {
     try {
       const id = await startEval({
         ...(localMode ? { local: localTarget } : { modelId }),
-        items,
+        /* subsets 是表单态；后端只认 datasetArgs（部分勾选时才有） */
+        items: items.map((it) => {
+          const args = argsOf(it);
+          return {
+            dataset: it.dataset,
+            ...(it.limit ? { limit: it.limit } : {}),
+            ...(args ? { datasetArgs: args } : {}),
+          };
+        }),
         ...(plugins.length ? { plugins } : {}),
         ...(extraArgs.trim() ? { extraArgs: extraArgs.trim() } : {}),
       });
@@ -247,7 +347,7 @@ export function EvalNewPage() {
       key: 'model',
       label: t('ev.modelUnderTest'),
       value: localMode ? baseModel : modelId,
-      apply: localMode ? setBaseModel : setModelId,
+      apply: localMode ? pickBaseModel : setModelId,
     },
     {
       key: 'eval_dataset',
@@ -307,11 +407,12 @@ export function EvalNewPage() {
               {localMode ? (
                 <>
                   <Field label={t('exp.baseModel')} hint={t('ev.baseHint')}>
-                    <Input
+                    <SearchSelect
                       value={baseModel}
-                      onChange={(e) => setBaseModel(e.target.value)}
+                      onChange={pickBaseModel}
+                      options={baseOptions}
                       placeholder="Qwen/Qwen2.5-0.5B-Instruct"
-                      className="h-8 text-[13px]"
+                      display={pickedCkpt || undefined}
                     />
                   </Field>
                   <Field label={t('ev.adaptersLabel')} hint={t('ev.adaptersHint')}>
@@ -378,53 +479,105 @@ export function EvalNewPage() {
                   className="h-8 text-[13px]"
                 />
               </Field>
-              <div className="border-border/60 max-h-80 overflow-auto rounded-lg border">
+              <div className="border-border/60 max-h-96 overflow-auto rounded-lg border">
                 {filtered.map((d) => {
                   const picked = items.find((it) => it.dataset === d.name);
+                  /* 子集选择只在多子集时有意义（单名义子集如 default/main 不展示） */
+                  const subsets = d.subsets && d.subsets.length > 1 ? d.subsets : undefined;
+                  const pickedSubs = picked?.subsets ?? subsets ?? [];
                   return (
-                    <div
-                      key={d.name}
-                      className="border-border/60 hover:bg-muted/50 flex items-center gap-3 border-b px-3 py-2 last:border-b-0"
-                    >
-                      <button
-                        type="button"
-                        onClick={() => toggle(d.name)}
-                        className="flex min-w-0 flex-1 items-center gap-2.5 text-left"
-                      >
-                        <span
-                          className={
-                            picked
-                              ? 'bg-primary text-primary-foreground flex size-4 flex-none items-center justify-center rounded text-[10px]'
-                              : 'border-border size-4 flex-none rounded border'
-                          }
+                    <div key={d.name} className="border-border/60 border-b last:border-b-0">
+                      <div className="hover:bg-muted/50 flex items-center gap-3 px-3 py-2">
+                        <button
+                          type="button"
+                          onClick={() => toggle(d.name)}
+                          className="flex min-w-0 flex-1 items-center gap-2.5 text-left"
                         >
-                          {picked ? '✓' : ''}
-                        </span>
-                        <span className="min-w-0 flex-1">
-                          <span className="text-foreground block truncate text-[13px]">
-                            {d.name}
-                            {d.prettyName !== d.name && (
-                              <span className="text-muted-foreground"> · {d.prettyName}</span>
+                          <span
+                            className={
+                              picked
+                                ? 'bg-primary text-primary-foreground flex size-4 flex-none items-center justify-center rounded text-[10px]'
+                                : 'border-border size-4 flex-none rounded border'
+                            }
+                          >
+                            {picked ? '✓' : ''}
+                          </span>
+                          <span className="min-w-0 flex-1">
+                            <span className="text-foreground block truncate text-[13px]">
+                              {d.name}
+                              {d.prettyName !== d.name && (
+                                <span className="text-muted-foreground"> · {d.prettyName}</span>
+                              )}
+                            </span>
+                            {(d.tags.length > 0 || d.metrics.length > 0) && (
+                              <span className="text-muted-foreground/70 block truncate text-[11px]">
+                                {[...d.tags, ...d.metrics].slice(0, 6).join(' / ')}
+                              </span>
                             )}
                           </span>
-                          {(d.tags.length > 0 || d.metrics.length > 0) && (
-                            <span className="text-muted-foreground/70 block truncate text-[11px]">
-                              {[...d.tags, ...d.metrics].slice(0, 6).join(' / ')}
-                            </span>
-                          )}
-                        </span>
-                      </button>
+                        </button>
+                        {subsets && picked && (
+                          <span className="text-muted-foreground flex-none text-[11px]">
+                            {t('ev.subsetsPicked', { n: picked.subsets?.length ?? subsets.length, m: subsets.length })}
+                          </span>
+                        )}
+                      </div>
                       {picked && (
-                        /* 每集独立采样：limit 留空 = 全量评测 */
-                        <div className="flex flex-none items-center gap-1.5">
-                          <span className="text-muted-foreground text-[11px]">{t('ev.limitBefore')}</span>
-                          <NumberInput
-                            className="h-7 w-20 text-[13px]"
-                            value={picked.limit}
-                            onChange={(n) => setLimit(d.name, n)}
-                            min={1}
-                          />
-                          <span className="text-muted-foreground text-[11px]">{t('ev.limitAfter')}</span>
+                        /* 选中即展开：描述 + 子集勾选 + 采样数量 */
+                        <div className="bg-muted/30 space-y-2.5 border-t px-3 py-2.5">
+                          {d.description && (
+                            <p className="text-muted-foreground line-clamp-3 text-[12px]" title={d.description}>
+                              {d.description}
+                            </p>
+                          )}
+                          {subsets && (
+                            <div>
+                              <div className="mb-1.5 flex items-center justify-between">
+                                <span className="text-muted-foreground text-[11px]">
+                                  {t('ev.subsetsLabel', { n: subsets.length })}
+                                </span>
+                                <button
+                                  type="button"
+                                  onClick={() => selectAllSubsets(d.name)}
+                                  className="text-primary hover:underline text-[11px]"
+                                >
+                                  {t('ev.subsetsAll')}
+                                </button>
+                              </div>
+                              <div className="flex max-h-32 flex-wrap gap-1.5 overflow-auto">
+                                {subsets.map((s) => {
+                                  const on = pickedSubs.includes(s);
+                                  return (
+                                    <button
+                                      key={s}
+                                      type="button"
+                                      onClick={() => toggleSubset(d.name, s)}
+                                      className={
+                                        on
+                                          ? 'bg-primary/10 border-primary/40 text-foreground rounded-full border px-2 py-0.5 text-[11px]'
+                                          : 'border-border/70 text-muted-foreground rounded-full border px-2 py-0.5 text-[11px] opacity-60'
+                                      }
+                                    >
+                                      {s}
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                              <p className="text-muted-foreground/70 mt-1 text-[11px]">
+                                {t('ev.subsetsHint')}
+                              </p>
+                            </div>
+                          )}
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-muted-foreground text-[11px]">{t('ev.limitBefore')}</span>
+                            <NumberInput
+                              className="h-7 w-20 text-[13px]"
+                              value={picked.limit}
+                              onChange={(n) => setLimit(d.name, n)}
+                              min={1}
+                            />
+                            <span className="text-muted-foreground text-[11px]">{t('ev.limitAfter')}</span>
+                          </div>
                         </div>
                       )}
                     </div>

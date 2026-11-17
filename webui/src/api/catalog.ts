@@ -8,6 +8,7 @@
 
 import { apiBase } from './base';
 import { tStatic } from '../i18n/static';
+import type { SearchOption } from '../components/SearchSelect';
 
 /** 一条候选：id 是落进命令行的值，modelType/tags 仅辅助展示 */
 export interface CatalogEntry {
@@ -23,6 +24,54 @@ export async function listCatalog(): Promise<{ models: CatalogEntry[]; datasets:
   const res = await fetch(apiBase() + '/api/catalog');
   if (!res.ok) throw new Error(tStatic('api.readCatalogFailed', { status: res.status }));
   return await res.json();
+}
+
+/*
+ * 本机训练 checkpoint（/api/ckpt-catalog）：server 每次请求实时扫
+ * ~/.swift/train，删了即消失——与 /api/catalog 的探测缓存职责分开。
+ */
+export interface CkptEntry {
+  /** 断点目录绝对路径（落进 --model / --adapters 的值） */
+  path: string;
+  taskId: string;
+  name: string;
+  mtimeMs: number;
+  kind: 'lora' | 'full';
+  /** 训练时的底座模型（lineage.json）；LoRA 断点要配底座才能用 */
+  baseModel?: string;
+  tuner?: string;
+}
+
+/** 实时清单：失败返回空数组（ckpt 面不可达不拦模型候选，下拉仍可自由输入） */
+export async function listCkptCatalog(): Promise<CkptEntry[]> {
+  try {
+    const res = await fetch(apiBase() + '/api/ckpt-catalog');
+    if (!res.ok) return [];
+    return ((await res.json()) as { checkpoints?: CkptEntry[] }).checkpoints ?? [];
+  } catch {
+    return [];
+  }
+}
+
+/** ckpt 条目 -> 搜索下拉候选（value 是目录路径，label 短名，hint 带任务与类型） */
+export function ckptOption(c: CkptEntry): SearchOption {
+  const short = (c.baseModel ?? c.taskId).split('/').pop() || c.taskId;
+  return {
+    value: c.path,
+    label: `${short}:${c.name}`,
+    hint: `${c.taskId} · ${tStatic(c.kind === 'lora' ? 'api.ckptLora' : 'api.ckptFull')}`,
+  };
+}
+
+/*
+ * 选中值命中本机 ckpt 时的表单落点（四页共用）：full -> model 填路径；
+ * lora -> model 填底座、adapters 填路径。未命中返回 null，页面走原逻辑。
+ */
+export function ckptPick(map: Record<string, CkptEntry>, value: string): { model: string; adapters?: string } | null {
+  const c = map[value];
+  if (!c) return null;
+  if (c.kind === 'full') return { model: c.path };
+  return { model: c.baseModel ?? '', adapters: c.path };
 }
 
 /** 模型条目 -> 搜索下拉候选（hint 显示 model_type 与能力标签） */

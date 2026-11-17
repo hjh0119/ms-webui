@@ -11,7 +11,7 @@ import { Input } from '@/components/ui/input';
 import { Switch } from '@/components/ui/switch';
 import { Button } from '@/components/ui/button';
 import { MODULES } from '@/theme/modules';
-import { listCatalog, modelOption } from '@/api/catalog';
+import { listCatalog, modelOption, listCkptCatalog, ckptOption, ckptPick, type CatalogEntry, type CkptEntry } from '@/api/catalog';
 import { listPlugins } from '@/api/plugins';
 import { listExports, startExport, type ExportTaskInfo } from '@/api/export';
 import { pushRecent } from '@/store/recent';
@@ -51,16 +51,45 @@ export function ExportNewPage() {
   const [extraArgs, setExtraArgs] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [modelOptions, setModelOptions] = useState<SearchOption[]>([]);
+  /* 本机训练 ckpt：path -> 条目（选中时联动填 model/adapters） */
+  const [ckptMap, setCkptMap] = useState<Record<string, CkptEntry>>({});
+  /* 选中 ckpt 的回显名（「底座:断点名」，与部署页同病同修）：model 字段落到
+   * 的是底座名，回显 value 分不出选的是哪个断点——SearchSelect 的 display 覆盖 */
+  const [pickedCkpt, setPickedCkpt] = useState('');
   const [pluginOptions, setPluginOptions] = useState<SearchOption[]>([]);
 
   const quantOn = quant !== 'none';
 
+  /*
+   * 模型选中入口（表单与「将要执行」共用）：命中本机训练 ckpt 时联动填表——
+   * full 断点 model 直接填路径；LoRA 断点 model 填底座、adapters 填路径。
+   * 后改 model 不自动清 adapters（显式字段，用户可见可改）。
+   */
+  const pickModel = (v: string) => {
+    const hit = ckptPick(ckptMap, v);
+    if (hit) {
+      setModel(hit.model);
+      setPickedCkpt(ckptOption(ckptMap[v]).label ?? '');
+      if (hit.adapters) setAdapters(hit.adapters);
+      return;
+    }
+    setPickedCkpt('');
+    setModel(v);
+  };
+
   useEffect(() => {
-    listCatalog()
-      .then((c) => setModelOptions(c.models.map(modelOption)))
-      .catch(() => {
-        /* 清单不可达：SearchSelect 仍接受自由输入 */
-      });
+    /*
+     * 模型候选一次装配：注册表清单（python 探针，秒级）与本机 ckpt（实时扫描，
+     * 毫秒级）各自先行 set 会互相覆盖；两路到齐一次拼接，ckpt 排前——空关键
+     * 词下拉截前 50，排在千余条注册表后面永远轮不到显示。
+     */
+    void Promise.all([
+      listCatalog().then((c) => c.models).catch(() => [] as CatalogEntry[]),
+      listCkptCatalog(),
+    ]).then(([models, ckpts]) => {
+      setModelOptions([...ckpts.map(ckptOption), ...models.map(modelOption)]);
+      setCkptMap(Object.fromEntries(ckpts.map((c) => [c.path, c])));
+    });
     listPlugins()
       .then((ps) => setPluginOptions(ps.map((p) => ({ value: p.source, label: p.id, hint: p.note }))))
       .catch(() => {
@@ -193,7 +222,7 @@ export function ExportNewPage() {
 
   /* 交给 AI 助手的字段 */
   const fields: ConfigField[] = [
-    { key: 'model', label: t('exp.baseModel'), value: model, apply: setModel },
+    { key: 'model', label: t('exp.baseModel'), value: model, apply: pickModel },
     { key: 'adapters', label: 'LoRA adapter', value: adapters, apply: setAdapters },
     { key: 'merge_lora', label: t('exp.mergeLora'), value: mergeLora ? 'on' : 'off', apply: (v) => setMergeLora(v === 'on') },
     { key: 'quant_method', label: t('exp.quantMethod'), value: quant, apply: (v) => setQuant(v as QuantMethod) },
@@ -235,9 +264,10 @@ export function ExportNewPage() {
               <Field label={t('exp.baseModel')} hint={t('tn.modelHint')}>
                 <SearchSelect
                   value={model}
-                  onChange={setModel}
+                  onChange={pickModel}
                   options={modelOptions}
                   placeholder="Qwen/Qwen2.5-0.5B-Instruct"
+                  display={pickedCkpt || undefined}
                 />
               </Field>
               <Field label="LoRA adapter" hint={t('exp.adapterHint')}>

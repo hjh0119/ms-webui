@@ -1282,22 +1282,38 @@ function publicEvalTask(t: EvalTask) {
 }
 
 /**
- * EvalScope 的数据集注册表（207 个基准）：spawn 一次 python 导出 JSON，
+ * EvalScope 的数据集注册表（290 个基准）：spawn 一次 python 导出 JSON，
  * 结果缓存在模块变量里——注册表随安装版本固定，不需要每请求重探。
+ * description 截首个正文段（Overview 标题后的第一段，限 400 字）；subsets 是
+ * 评测集的子集清单（如 ceval 的 52 个科目），供前端勾选后经 eval_dataset_args
+ * 的 {dataset: {subsets: [...]}} 形态下传。
  */
-let evalDatasetsCache: { name: string; prettyName: string; tags: string[]; metrics: string[] }[] | null = null;
+let evalDatasetsCache: { name: string; prettyName: string; tags: string[]; metrics: string[]; description?: string; subsets?: string[] }[] | null = null;
 
-function listEvalDatasets(): Promise<{ name: string; prettyName: string; tags: string[]; metrics: string[] }[]> {
+function listEvalDatasets(): Promise<
+  { name: string; prettyName: string; tags: string[]; metrics: string[]; description?: string; subsets?: string[] }[]
+> {
   if (evalDatasetsCache) return Promise.resolve(evalDatasetsCache);
   return new Promise((resolvePromise, rejectPromise) => {
     const script =
       'import json\n' +
       'from evalscope.api.registry import BENCHMARK_REGISTRY\n' +
+      'def first_para(md):\n' +
+      "    parts = [p.strip() for p in (md or '').split('\\n\\n')]\n" +
+      '    for i, p in enumerate(parts):\n' +
+      "        if p.startswith('#'):\n" +
+      '            for q in parts[i + 1:]:\n' +
+      "                if q and not q.startswith('#'):\n" +
+      '                    return q[:400]\n' +
+      '            break\n' +
+      "    return (parts[0] if parts else '')[:400]\n" +
       'out = []\n' +
       'for name, meta in sorted(BENCHMARK_REGISTRY.items()):\n' +
       "    out.append({'name': name, 'prettyName': getattr(meta, 'pretty_name', None) or name," +
       " 'tags': list(getattr(meta, 'tags', None) or []), 'metrics': [m.get('name', '') if isinstance(m, dict) else str(m)" +
-      ' for m in (getattr(meta, "metric_list", None) or [])]})\n' +
+      ' for m in (getattr(meta, "metric_list", None) or [])],' +
+      " 'description': first_para(getattr(meta, 'description', None)) or None," +
+      " 'subsets': list(getattr(meta, 'subset_list', None) or []) or None})\n" +
       'print(json.dumps(out))';
     const proc = spawn(resolvePython(), ['-c', script], { stdio: ['ignore', 'pipe', 'pipe'] });
     let out = '';
@@ -2566,6 +2582,75 @@ function listTrainCheckpoints(outputDir: string): Array<{ name: string; mtimeMs:
   } catch {
     return [];
   }
+}
+
+/*
+ * 本机训练 checkpoint 清单（新建页模型下拉的候选源之一）。每次请求实时扫
+ * 描、不缓存：ckpt 随训练与清理动态增删，删了即从下拉消失，无需启动刷
+ * 新或失效补偿；扫描是纯 fs（几十任务也就几百次 stat），毫秒级。
+ * baseModel/tuner 取同任务 lineage.json —— LoRA 断点要配底座才能用，页面
+ * 靠它联动填表。remote 任务本机枚举不到 ckpt，天然扫不出。
+ */
+interface CkptEntry {
+  path: string;
+  taskId: string;
+  name: string;
+  mtimeMs: number;
+  kind: 'lora' | 'full';
+  baseModel?: string;
+  tuner?: string;
+}
+
+function scanLocalCheckpoints(): CkptEntry[] {
+  const out: CkptEntry[] = [];
+  const trainRoot = join(swiftHome(), 'train');
+  let taskIds: string[];
+  try {
+    taskIds = readdirSync(trainRoot, { withFileTypes: true })
+      .filter((d) => d.isDirectory())
+      .map((d) => d.name);
+  } catch {
+    return out;
+  }
+  for (const taskId of taskIds) {
+    let lineage: { model?: unknown; tuner?: unknown } = {};
+    try {
+      lineage = JSON.parse(readFileSync(join(trainRoot, taskId, 'lineage.json'), 'utf-8'));
+    } catch {
+      /* 血缘缺失（老任务/写失败）：条目不带底座，下拉 label 退回任务名 */
+    }
+    const baseModel = typeof lineage.model === 'string' && lineage.model ? lineage.model : undefined;
+    const tuner = typeof lineage.tuner === 'string' && lineage.tuner ? lineage.tuner : undefined;
+    const outputDir = join(trainRoot, taskId, 'output');
+    for (const run of listTrainCheckpoints(outputDir)) {
+      const runDir = join(outputDir, run.name);
+      /* 老形态：run 目录本身就是断点；v5 形态：run 里再列 checkpoint-* */
+      const ckpts = run.name.startsWith('checkpoint')
+        ? [{ name: run.name, mtimeMs: run.mtimeMs, dir: runDir }]
+        : listTrainCheckpoints(runDir).map((c) => ({ ...c, dir: join(runDir, c.name) }));
+      for (const c of ckpts) {
+        let kind: 'lora' | 'full' | null = null;
+        try {
+          if (existsSync(join(c.dir, 'adapter_model.safetensors'))) kind = 'lora';
+          else if (existsSync(join(c.dir, 'config.json'))) kind = 'full';
+        } catch {
+          kind = null;
+        }
+        /* 两者都无（写盘中途/异常产物）：不进下拉 */
+        if (!kind) continue;
+        out.push({
+          path: c.dir,
+          taskId,
+          name: c.name,
+          mtimeMs: c.mtimeMs,
+          kind,
+          ...(baseModel ? { baseModel } : {}),
+          ...(tuner ? { tuner } : {}),
+        });
+      }
+    }
+  }
+  return out.sort((a, b) => b.mtimeMs - a.mtimeMs);
 }
 
 /** 访谈自由文本的评测身份归一化：「live_code_bench (release_v6)」→ 注册名 + subset */
@@ -4378,6 +4463,20 @@ function swiftApiPlugin(): Plugin {
           const catalog = await listCatalog();
           res.setHeader('Content-Type', 'application/json');
           res.end(JSON.stringify(catalog));
+        } catch (e) {
+          res.statusCode = 500;
+          res.end(JSON.stringify({ error: String(e) }));
+        }
+      });
+
+      /*
+       * 本机训练 ckpt 清单（新建页模型下拉候选的补充源）：实时扫描、不缓存
+       * ——ckpt 随训练与清理动态增删，删了即从下拉消失。见 scanLocalCheckpoints。
+       */
+      server.middlewares.use('/api/ckpt-catalog', (_req, res) => {
+        try {
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({ checkpoints: scanLocalCheckpoints() }));
         } catch (e) {
           res.statusCode = 500;
           res.end(JSON.stringify({ error: String(e) }));

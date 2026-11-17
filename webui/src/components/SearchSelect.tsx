@@ -38,6 +38,7 @@ export function SearchSelect({
   options,
   placeholder,
   allowCustom = true,
+  display,
 }: {
   value: string;
   onChange: (v: string) => void;
@@ -45,9 +46,19 @@ export function SearchSelect({
   placeholder?: string;
   /** false = 只允许候选里的值（如二选一引擎），输入不匹配时按钮不可用 */
   allowCustom?: boolean;
+  /*
+   * 输入框显示文本覆盖（与 value 解耦）：选本机 ckpt 的场景 value 会落到
+   * 底座名/路径，回显若直接显示 value 就看不出选的是哪个断点——命中时
+   * 页面传「底座:ckpt 名」这类合成显示，聚焦输入时它也作为搜索起点文本。
+   * 不传 = 显示 value 原文（既有行为不变）。
+   */
+  display?: string;
 }) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
+  /* 手动编辑过的字段放弃覆盖文本（用户改了底座名就别再替他显示旧 ckpt 名） */
+  const [edited, setEdited] = useState(false);
+  const shown = !edited && display ? display : value;
 
   const { t } = useT();
   const filtered = useMemo(() => filterOptions(options, value), [options, value]);
@@ -61,7 +72,7 @@ export function SearchSelect({
   return (
     <div ref={rootRef} className="relative">
       <Input
-        value={value}
+        value={shown}
         placeholder={placeholder}
         onFocus={() => {
           setOpen(true);
@@ -79,6 +90,7 @@ export function SearchSelect({
           }
         }}
         onChange={(e) => {
+          setEdited(true);
           onChange(e.target.value);
           setOpen(true);
         }}

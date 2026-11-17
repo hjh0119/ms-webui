@@ -9,8 +9,9 @@ import type { ConfigField } from '@/components/PageAssistant';
 import { Field, FieldStack, NumberInput, SegmentedControl } from '@/components/FormField';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { Switch } from '@/components/ui/switch';
 import { MODULES } from '@/theme/modules';
-import { listCatalog, modelOption } from '@/api/catalog';
+import { listCatalog, modelOption, listCkptCatalog, ckptOption, ckptPick, type CatalogEntry, type CkptEntry } from '@/api/catalog';
 import { listPlugins } from '@/api/plugins';
 import { listDeploys, startDeploy } from '@/api/deploy';
 import { pushRecent } from '@/store/recent';
@@ -37,17 +38,51 @@ export function DeployNewPage() {
   const [gpuSel, setGpuSel] = useState<GpuSelection>(EMPTY_GPU_SELECTION);
   const [plugins, setPlugins] = useState<string[]>([]);
   const [adapters, setAdapters] = useState<string[]>([]);
+  /* 合并单个 LoRA 进权重（--merge_lora）：与 adapters 直挂二选一——勾了它启动慢但请求免 adapter 路由 */
+  const [mergeLora, setMergeLora] = useState(false);
   const [extraArgs, setExtraArgs] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [modelOptions, setModelOptions] = useState<SearchOption[]>([]);
+  /* 本机训练 ckpt：path -> 条目（选中时联动填 model/adapters） */
+  const [ckptMap, setCkptMap] = useState<Record<string, CkptEntry>>({});
+  /*
+   * 选中 ckpt 的回显名（「底座:断点名」）：model 字段落到的是底座名，多个断点
+   * 同底座时回显 value 分不出选的是哪个——SearchSelect 的 display 覆盖文本
+   * 由此供给；未选 ckpt 时空串 = 回显 value 原文。
+   */
+  const [pickedCkpt, setPickedCkpt] = useState('');
   const [pluginOptions, setPluginOptions] = useState<SearchOption[]>([]);
 
+  /*
+   * 模型选中入口（表单与「将要执行」共用）：命中本机训练 ckpt 时联动填表——
+   * full 断点 model 直接填路径；LoRA 断点 model 填底座、adapters 填路径。
+   * 后改 model 不自动清 adapters（显式字段，用户可见可改）。
+   */
+  const pickModel = (v: string) => {
+    const hit = ckptPick(ckptMap, v);
+    if (hit) {
+      setModel(hit.model);
+      setPickedCkpt(ckptOption(ckptMap[v]).label ?? '');
+      if (hit.adapters) setAdapters([hit.adapters]);
+      return;
+    }
+    setPickedCkpt('');
+    setModel(v);
+  };
+
   useEffect(() => {
-    listCatalog()
-      .then((c) => setModelOptions(c.models.map(modelOption)))
-      .catch(() => {
-        /* 清单不可达：SearchSelect 仍接受自由输入 */
-      });
+    /*
+     * 模型候选一次装配：注册表清单（python 探针，秒级）与本机 ckpt（实时扫描，
+     * 毫秒级）各自先行 set 会互相覆盖；两路到齐一次拼接，ckpt 排前——空关键
+     * 词下拉截前 50，排在千余条注册表后面永远轮不到显示。
+     */
+    void Promise.all([
+      listCatalog().then((c) => c.models).catch(() => [] as CatalogEntry[]),
+      listCkptCatalog(),
+    ]).then(([models, ckpts]) => {
+      setModelOptions([...ckpts.map(ckptOption), ...models.map(modelOption)]);
+      setCkptMap(Object.fromEntries(ckpts.map((c) => [c.path, c])));
+    });
     listPlugins()
       .then((ps) => setPluginOptions(ps.map((p) => ({ value: p.source, label: p.id, hint: p.note }))))
       .catch(() => {
@@ -130,13 +165,14 @@ export function DeployNewPage() {
       `    --infer_backend ${engine} \\`,
       `    --served_model_name ${servedName || t('dp.cmdServedName')} \\`,
       ...(adapters.length ? [`    --adapters ${adapters.join(' ')} \\`] : []),
+      ...(mergeLora ? ['    --merge_lora true \\'] : []),
       ...(plugins.length ? [`    --external_plugins ${plugins.join(' ')} \\`] : []),
       ...(nproc > 1 ? [`    --nproc_per_node ${nproc} \\`] : []),
       `    --port ${port || t('dp.cmdPort')}`,
       ...(extraArgs.trim() ? [`    ${extraArgs.trim()}`] : []),
     ];
     return lines.join('\n');
-  }, [model, engine, servedName, port, gpuSel, nproc, plugins, adapters, extraArgs, t]);
+  }, [model, engine, servedName, port, gpuSel, nproc, plugins, adapters, mergeLora, extraArgs, t]);
 
   const submit = async () => {
     if (!model.trim()) {
@@ -152,6 +188,7 @@ export function DeployNewPage() {
         port: port || undefined,
         ...(plugins.length ? { plugins } : {}),
         ...(adapters.length ? { adapters } : {}),
+        ...(mergeLora ? { mergeLora: true } : {}),
         ...(extraArgs.trim() ? { extraArgs: extraArgs.trim() } : {}),
         /* 两模式互斥：本机给卡号列表，集群给卡数 */
         ...(gpuSel.mode === 'local'
@@ -179,7 +216,7 @@ export function DeployNewPage() {
 
   /* 交给 AI 助手的字段 */
   const fields: ConfigField[] = [
-    { key: 'model', label: t('tn.modelLabel'), value: model, apply: setModel },
+    { key: 'model', label: t('tn.modelLabel'), value: model, apply: pickModel },
     { key: 'served_model_name', label: t('dp.servedName'), value: servedName, apply: setServedName },
     { key: 'infer_backend', label: t('dp.engine'), value: engine, apply: setEngine },
     {
@@ -188,6 +225,7 @@ export function DeployNewPage() {
       value: adapters.join(' '),
       apply: (v) => setAdapters(v.split(/\s+/).filter(Boolean)),
     },
+    { key: 'merge_lora', label: t('dp.mergeLora'), value: mergeLora ? 'true' : 'false', apply: (v) => setMergeLora(v === 'true') },
     { key: 'port', label: t('dp.port'), value: String(port ?? ''), apply: (v) => setPort(Number(v)) },
     {
       key: 'gpu',
@@ -225,9 +263,10 @@ export function DeployNewPage() {
               <Field label={t('tn.modelLabel')} hint={t('tn.modelHint')}>
                 <SearchSelect
                   value={model}
-                  onChange={setModel}
+                  onChange={pickModel}
                   options={modelOptions}
                   placeholder="Qwen/Qwen3-8B"
+                  display={pickedCkpt || undefined}
                 />
               </Field>
               <Field label={t('dp.servedName')} hint={t('dp.servedNameHint')}>
@@ -278,6 +317,13 @@ export function DeployNewPage() {
                   options={[]}
                   placeholder={t('dp.adaptersPh')}
                 />
+              </Field>
+              <Field label={t('dp.mergeLora')} hint={t('dp.mergeLoraHint')}>
+                {/* 开关带状态字（一格网格里只放一枚 Switch 会显得空） */}
+                <div className="flex h-8 items-center gap-2.5">
+                  <Switch checked={mergeLora} onCheckedChange={setMergeLora} />
+                  <span className="text-muted-foreground text-[12px]">{mergeLora ? t('tn.switchOn') : t('tn.switchOff')}</span>
+                </div>
               </Field>
             </FieldStack>
           ),

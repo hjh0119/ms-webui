@@ -11,7 +11,7 @@ import { Input } from '@/components/ui/input';
 import { Switch } from '@/components/ui/switch';
 import { Button } from '@/components/ui/button';
 import { MODULES } from '@/theme/modules';
-import { listCatalog, modelOption, datasetOption } from '@/api/catalog';
+import { listCatalog, modelOption, datasetOption, listCkptCatalog, ckptOption, ckptPick, type CatalogEntry, type CkptEntry } from '@/api/catalog';
 import { listPlugins } from '@/api/plugins';
 import { listTrains, startCodeTrain, startTrain, type TrainTaskInfo, fetchDatasetPreview, fetchModelStructure, listOrmRules, type DatasetPreviewRow, type ModelStructure } from '@/api/train';
 import { listGpus, type GpuInfo } from '@/api/deploy';
@@ -110,6 +110,14 @@ export function TrainNewPage() {
   const [submitting, setSubmitting] = useState(false);
   /** 候选清单：模型/数据集（catalog）、插件（plugins.json 登记名） */
   const [modelOptions, setModelOptions] = useState<SearchOption[]>([]);
+  /* 本机训练 ckpt：path -> 条目（选中时联动填 model/adapters） */
+  const [ckptMap, setCkptMap] = useState<Record<string, CkptEntry>>({});
+  /*
+   * 选中 ckpt 的回显名（「底座:断点名」，与部署页同病同修）：model 字段落到
+   * 的是底座名，回显 value 分不出选的是哪个断点——SearchSelect 的 display
+   * 覆盖文本由此供给；未选 ckpt 时空串 = 回显 value 原文。
+   */
+  const [pickedCkpt, setPickedCkpt] = useState('');
   const [datasetOptions, setDatasetOptions] = useState<SearchOption[]>([]);
   const [pluginOptions, setPluginOptions] = useState<SearchOption[]>([]);
   /*
@@ -169,6 +177,13 @@ export function TrainNewPage() {
     setPreviewError(null);
   }, [datasets[0]]);
 
+  /*
+   * self-cognition 数据集的身份必填门：数据集问答应里的 {{NAME}}/{{AUTHOR}}
+   * 占位符靠 --model_name/--model_author 替换，不填会训出带字面占位符的无效
+   * 身份（模型学不到任何具体名字，推理时回落底座认知）。两个键走 params 字典
+   * （key 即 CLI flag），命令预览与后端拼装同源，零拼装改动。
+   */
+  const selfCognition = datasets.some((d) => d.includes('self-cognition'));
   /* 显存预估的表单输入（未填项取 CLI 默认）：LoRA r / batch / seq / 检查点 */
   const loraRank = Number(params.lora_rank) > 0 ? Number(params.lora_rank) : 8;
   const mBatch = Number(params.per_device_train_batch_size) > 0 ? Number(params.per_device_train_batch_size) : 1;
@@ -195,14 +210,24 @@ export function TrainNewPage() {
         : '';
 
   useEffect(() => {
-    listCatalog()
-      .then((c) => {
-        setModelOptions(c.models.map(modelOption));
-        setDatasetOptions(c.datasets.map(datasetOption));
-      })
-      .catch(() => {
-        /* 清单不可达：SearchSelect 仍接受自由输入 */
-      });
+    /*
+     * 模型候选一次装配到位：注册表清单（python 探针，秒级）与本机 ckpt（实时
+     * 扫描，毫秒级）各自先行 set 会互相覆盖（先到的被后到的整体 set 抹掉）；
+     * 两路到齐一次拼接，ckpt 排前——注册表千余条，空关键词下拉截前 50，
+     * 排后面永远轮不到显示。任一路失败退空数组，不拦另一路。
+     */
+    void Promise.all([
+      listCatalog()
+        .then((c) => {
+          setDatasetOptions(c.datasets.map(datasetOption));
+          return c.models;
+        })
+        .catch(() => [] as CatalogEntry[]),
+      listCkptCatalog(),
+    ]).then(([models, ckpts]) => {
+      setModelOptions([...ckpts.map(ckptOption), ...models.map(modelOption)]);
+      setCkptMap(Object.fromEntries(ckpts.map((c) => [c.path, c])));
+    });
     listPlugins()
       .then((ps) =>
         setPluginOptions(
@@ -257,6 +282,12 @@ export function TrainNewPage() {
         }
         /* rl_type 是独立选择器管的，不进 params 表单面 */
         delete known.rl_type;
+        /* adapters 是页面顶层字段（同 model/tuner），不进 ALL_PARAMS，单独回填 */
+        if (typeof src.params.adapters === 'string' && src.params.adapters) setParam('adapters', src.params.adapters);
+        /* 身份字段同 adapters（联动字段不在 ALL_PARAMS 清单里，模板克隆单独回填） */
+        for (const k of ['model_name', 'model_author'] as const) {
+          if (typeof src.params[k] === 'string' && src.params[k]) setParam(k, src.params[k]);
+        }
         setParams(known);
         setExtraArgs(src.extraArgs ?? '');
         setGpuSel(
@@ -314,6 +345,23 @@ export function TrainNewPage() {
       else next[key] = v;
       return next;
     });
+
+  /*
+   * 模型选中入口（表单与「将要执行」共用）：命中本机训练 ckpt 时联动填表——
+   * full 断点 model 直接填路径；LoRA 断点 model 填底座、adapters 填路径。
+   * 后改 model 不自动清 adapters（显式字段，用户可见可改）。
+   */
+  const pickModel = (v: string) => {
+    const hit = ckptPick(ckptMap, v);
+    if (hit) {
+      setModel(hit.model);
+      setPickedCkpt(ckptOption(ckptMap[v]).label ?? '');
+      if (hit.adapters) setParam('adapters', hit.adapters);
+      return;
+    }
+    setPickedCkpt('');
+    setModel(v);
+  };
 
   /*
    * 切算法 = 换一套参数面板：旧算法的专有 flag（如 mopd 的 teacher_model）
@@ -552,6 +600,11 @@ export function TrainNewPage() {
       toast.error(t('tn.errDataset'));
       return t('tn.errDataset');
     }
+    /* self-cognition 身份必填：不填训出的是字面 {{NAME}} 占位符，详见字段旁提示 */
+    if (selfCognition && (!String(params.model_name ?? '').trim() || !String(params.model_author ?? '').trim())) {
+      toast.error(t('tn.errCognition'));
+      return t('tn.errCognition');
+    }
     /* 在线 RL：双组配卡不合法（未填/超卡数/不能整分）时拒绝提交并点名原因 */
     if (isOnlineRl && !rlInfo.valid) {
       toast.error(rlInfo.error ?? t('tn.errRlFirst'));
@@ -675,7 +728,8 @@ export function TrainNewPage() {
     { key: 'task_type', label: 'task_type（任务类型）', value: taskType, options: ['sft', 'pt', 'rl'], apply: (v) => setTaskType(v as TaskType) },
     /* 与页面算法选择器同一条链路（changeRlType 连带清算法残留值） */
     { key: 'rl_type', label: 'rl_type（RL 算法，task_type=rl 时生效）', value: rlType, options: RL_TYPE_OPTIONS.flatMap((g) => g.items.map((i) => i.value)), apply: changeRlType },
-    { key: 'model', label: t('tn.modelLabel'), value: model, apply: setModel },
+    { key: 'model', label: t('tn.modelLabel'), value: model, apply: pickModel },
+    { key: 'adapters', label: t('tn.adaptersLabel'), value: String(params.adapters ?? ''), apply: (v) => setParam('adapters', v.trim()) },
     { key: 'dataset', label: t('tn.fDataset'), value: datasets.join(' '), apply: (v) => setDatasets(v.split(/[\s,]+/).filter(Boolean)) },
     { key: 'tuner', label: t('tn.tunerLabel'), value: tuner, options: ['lora', 'full', 'trainable_tokens'], apply: (v) => setTuner(v as Tuner) },
     { key: 'external_plugins', label: 'external_plugins（插件文件/目录/hub id，多个用空格分隔）', value: plugins.join(' '), apply: (v) => setPlugins(v.split(/[\s,]+/).filter(Boolean)) },
@@ -1027,9 +1081,10 @@ export function TrainNewPage() {
           <Field label={t('tn.modelLabel')} hint={t('tn.modelHint')}>
             <SearchSelect
               value={model}
-              onChange={setModel}
+              onChange={pickModel}
               options={modelOptions}
               placeholder="Qwen/Qwen2.5-7B-Instruct"
+              display={pickedCkpt || undefined}
             />
           </Field>
           {mode === 'cli' && (
@@ -1043,6 +1098,17 @@ export function TrainNewPage() {
               loraRank={loraRank}
             />
           )}
+          {/*
+           * LoRA 断点继续训：--adapters 指向训练产出的 checkpoint 目录，在原
+           * adapter 上继续训练。params 键即 CLI flag（命令预览与后端拼装同源）。
+           */}
+          <Field label={t('tn.adaptersLabel')} hint={t('tn.adaptersHint')}>
+            <Input
+              value={String(params.adapters ?? '')}
+              onChange={(e) => setParam('adapters', e.target.value)}
+              placeholder="/root/.swift/train/<任务>/output/<run>/checkpoint-final"
+            />
+          </Field>
           <Field label={t('tn.datasetLabel')} hint={t('tn.datasetHint')}>
             <TagInput
               values={datasets}
@@ -1051,6 +1117,25 @@ export function TrainNewPage() {
               placeholder="AI-ModelScope/alpaca-gpt4-data-zh"
             />
           </Field>
+          {selfCognition && (
+            <>
+              {/* 联动身份字段：选了 self-cognition 数据集才出现，不填不让提交（见 submit 门） */}
+              <Field label={t('tn.cognitionNameLabel')} hint={t('tn.cognitionNameHint')}>
+                <Input
+                  value={String(params.model_name ?? '')}
+                  onChange={(e) => setParam('model_name', e.target.value)}
+                  placeholder="swift-assistant"
+                />
+              </Field>
+              <Field label={t('tn.cognitionAuthorLabel')} hint={t('tn.cognitionAuthorHint')}>
+                <Input
+                  value={String(params.model_author ?? '')}
+                  onChange={(e) => setParam('model_author', e.target.value)}
+                  placeholder="ModelScope"
+                />
+              </Field>
+            </>
+          )}
           {mode === 'cli' && datasets.length > 0 && (
             <DatasetPreviewDialog
               dataset={datasets[0]}
