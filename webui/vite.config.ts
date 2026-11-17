@@ -2161,6 +2161,8 @@ function convsFile(): string {
 /**
  * 读失败返回 null（区别于「空库」）：坏文件下当空库跑 appendTurn/PUT 会把
  * 整库替换成单回合的桶——调用方必须显式处理 null（放弃回合 / 拒写 PUT）。
+ * 文件不存在不算坏：全新环境还没有对话，按空库起步（否则第一次回合提交
+ * 永远被放弃，convs.json 永远建不起来，无法自愈）。
  */
 function readConvs(): { chats: unknown[]; turns: Record<string, Record<string, unknown>> } | null {
   try {
@@ -2169,7 +2171,8 @@ function readConvs(): { chats: unknown[]; turns: Record<string, Record<string, u
       chats: Array.isArray((raw as { chats?: unknown }).chats) ? (raw as { chats: unknown[] }).chats : [],
       turns: (raw as { turns?: Record<string, Record<string, unknown>> }).turns ?? {},
     };
-  } catch {
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException)?.code === 'ENOENT') return { chats: [], turns: {} };
     return null;
   }
 }
@@ -6118,8 +6121,9 @@ if (req.method === 'POST' && !seg0) {
        *   结果、回合完成）。SSE 断开只是不看了；重连后 GET /api/convs 对账。
        * - DELETE /api/conv/:id：删除会话（chats + 全部 turns 桶）。
        * - POST /api/conv/:id/abort：停止按钮——中止该列页面提交的在跑回合。
-       * - POST /api/conv/:id/move：切模型续聊时把桶搬到新模型（旧语义保留）。
+       * - POST /api/conv/:id/move：切模型续聊时把桶搬到新模型（首页对比列用）。
        * - GET /api/conv/:id：单会话桶对账（回合完成后轻量拉回，防 SSE 丢事件）。
+       * - GET /api/conv/:id/history：助手单流历史（'*' 桶；旧分桶一次性迁移）。
        */
       server.middlewares.use('/api/conv', async (req, res) => {
         try {
@@ -6141,6 +6145,7 @@ if (req.method === 'POST' && !seg0) {
               title?: unknown;
               sampling?: unknown;
               noApproval?: unknown;
+              singleStream?: unknown;
             };
             const text = typeof body.text === 'string' ? body.text : '';
             const models = Array.isArray(body.models) ? body.models.filter((m): m is string => typeof m === 'string') : [];
@@ -6197,6 +6202,8 @@ if (req.method === 'POST' && !seg0) {
             }
             /* 页面免审总闸：引擎侧同语义放行该回合的一切审批 */
             const noApproval = body.noApproval === true;
+            /* 助手单流标记：历史存固定 '*' 桶，模型只是执行者（首页对比不带） */
+            const singleStream = body.singleStream === true;
             /* 展览模式的会话 token 随头走（与 /api/chat 代理同一取法） */
             const headerKey = req.headers['x-swift-api-key'];
             const apiKey = typeof headerKey === 'string' && headerKey ? headerKey : undefined;
@@ -6211,6 +6218,7 @@ if (req.method === 'POST' && !seg0) {
               ...(sampling ? { sampling } : {}),
               ...(apiKey ? { apiKey } : {}),
               ...(noApproval ? { noApproval: true } : {}),
+              ...(singleStream ? { singleStream: true } : {}),
             });
             if ('error' in r) {
               res.statusCode = 409;
@@ -6223,11 +6231,38 @@ if (req.method === 'POST' && !seg0) {
             return;
           }
           if (req.method === 'GET' && !segs[1]) {
-            /* 单会话桶对账（回合完成/重连时轻量拉回） */
+            /* 单会话桶对账（回合完成/重连时轻量拉回；首页对比列也走这里，不动桶结构） */
             const current = readConvs();
             const buckets = current?.turns[conv] ?? {};
             res.setHeader('Content-Type', 'application/json');
             res.end(JSON.stringify({ buckets }));
+            return;
+          }
+          if (req.method === 'GET' && segs[1] === 'history') {
+            /*
+             * 助手单流历史（与模型无关）：读 '*' 桶；无 '*' 桶且有旧分桶时
+             * 一次性迁移——按插入序合并进 '*' 并落盘，助手续聊旧会话不丢
+             * 历史。只由助手侧调用（fetchConvHistory），首页对账不走这里，
+             * 对比模式的各列独立桶不会被误合并。多桶并存时合并顺序无时间戳
+             * 可依，取对象插入序（助手旧会话通常仅一个非空桶）。
+             */
+            const current = readConvs();
+            if (current === null) {
+              res.statusCode = 500;
+              res.setHeader('Content-Type', 'application/json');
+              res.end(JSON.stringify({ error: 'convs.json unreadable' }));
+              return;
+            }
+            let buckets = (current.turns[conv] ?? {}) as Record<string, unknown[]>;
+            if (!buckets['*']?.length) {
+              const legacy = Object.entries(buckets).filter(([, msgs]) => msgs.length);
+              if (legacy.length) {
+                buckets = { '*': legacy.flatMap(([, msgs]) => msgs) };
+                writeConvs(current.chats, { ...current.turns, [conv]: buckets });
+              }
+            }
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ history: buckets['*'] ?? [] }));
             return;
           }
           if (req.method === 'GET' && segs[1] === 'live') {

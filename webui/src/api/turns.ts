@@ -35,6 +35,8 @@ export interface TurnSubmitPayload {
   apiKey?: string;
   /** 免审总闸（配置浮层）：引擎侧同语义放行该回合的一切审批 */
   noApproval?: boolean;
+  /** 助手单流：历史存固定 '*' 桶（与模型无关，模型只是执行者）；首页对比不带 */
+  singleStream?: boolean;
 }
 
 /** SSE 事件（与 server/turnEngine.ts 的 TurnEvent 同构；type-only 无法跨端共享，此处镜像） */
@@ -54,6 +56,8 @@ export interface TurnLiveEvent {
    * 后 POST resolvePageTool 回传结果，回合续轮。
    */
   call?: { id: string; name: string; arguments: string };
+  /** page-tool：挂起回合的真实执行模型（单流会话切模型后回传仍按它路由） */
+  executor?: string;
   error?: string;
 }
 
@@ -97,7 +101,7 @@ export async function abortTurn(conv: string, model: string): Promise<void> {
   }
 }
 
-/** 单会话桶对账：回合完成/重连时轻量拉回（server 是唯一真相源） */
+/** 单会话桶对账：回合完成/重连时轻量拉回（server 是唯一真相源；首页对比列用） */
 export async function fetchConvBuckets(conv: string): Promise<Record<string, ChatMessage[]>> {
   try {
     const res = await fetch(`${apiBase()}/api/conv/${encodeURIComponent(conv)}`);
@@ -108,10 +112,25 @@ export async function fetchConvBuckets(conv: string): Promise<Record<string, Cha
   }
 }
 
+/**
+ * 助手单流历史（与模型无关）：server 读 '*' 桶，旧分桶在端点侧一次性
+ * 迁移合并。助手挂载/切会话/turn-done 对账都用它，不再按模型取桶。
+ */
+export async function fetchConvHistory(conv: string): Promise<ChatMessage[]> {
+  try {
+    const res = await fetch(`${apiBase()}/api/conv/${encodeURIComponent(conv)}/history`);
+    if (!res.ok) return [];
+    return ((await res.json()) as { history?: ChatMessage[] }).history ?? [];
+  } catch {
+    return [];
+  }
+}
+
 /*
  * 页面工具回传面：页面执行完挂起工具（表单卡片应用、画布操作、跳转按钮）
  * 后把结果文本交回引擎续轮；失败静默（面板重开重放时重传）。挂起调用清单
- * 拉取用于挂载/重连恢复重放。
+ * 拉取用于挂载/重连恢复重放。model 语义 = 真实执行模型（executor）；
+ * 引擎按 conv + callId 定位，单流会话切模型后仍可结算。
  */
 export async function resolvePageTool(conv: string, model: string, callId: string, result: string): Promise<boolean> {
   try {
@@ -129,12 +148,12 @@ export async function resolvePageTool(conv: string, model: string, callId: strin
 export async function fetchPendingPageTools(
   conv: string,
   model?: string,
-): Promise<{ id: string; name: string; arguments: string; model?: string }[]> {
+): Promise<{ id: string; name: string; arguments: string; executor?: string }[]> {
   try {
     const q = model ? `?model=${encodeURIComponent(model)}` : '';
     const res = await fetch(`${apiBase()}/api/conv/${encodeURIComponent(conv)}/page-tools${q}`);
     if (!res.ok) return [];
-    return ((await res.json()) as { calls?: { id: string; name: string; arguments: string; model?: string }[] }).calls ?? [];
+    return ((await res.json()) as { calls?: { id: string; name: string; arguments: string; executor?: string }[] }).calls ?? [];
   } catch {
     return [];
   }
@@ -149,7 +168,7 @@ export async function deleteConv(conv: string): Promise<void> {
   }
 }
 
-/** 切模型续聊：把桶搬到新模型（目标桶已有消息不动） */
+/** 切模型续聊（首页对比列用）：把桶搬到新模型（目标桶已有消息不动）；助手单流不需要 */
 export async function moveConvBuckets(conv: string, from: string, to: string): Promise<void> {
   try {
     await fetch(`${apiBase()}/api/conv/${encodeURIComponent(conv)}/move`, {

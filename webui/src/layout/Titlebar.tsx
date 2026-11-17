@@ -15,19 +15,6 @@ import { useT, type MessageKey } from '@/i18n';
  * 刻意不做面包屑，也不放居中的大搜索条——搜索入口在侧栏。
  */
 
-/**
- * lucide 1.x 把品牌 logo 全部移出了图标库（品牌资产有各自的使用规范，
- * 不适合当通用图标维护），所以 GitHub 这个 mark 只能自己内联。
- * 用通用图标代替会丢掉识别度，这是少数值得手写 SVG 的地方。
- */
-function GithubMark({ size = 14 }: { size?: number }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
-      <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-2.91-.88-2.91-2.9 0-.86.31-1.57.82-2.12-.08-.2-.36-1.01.08-2.1 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.09.16 1.9.08 2.1.51.55.82 1.25.82 2.12 0 2.03-1.14 2.7-2.92 2.9.3.26.56.76.56 1.54 0 1.11-.01 2.01-.01 2.29 0 .21.15.46.55.38A7.995 7.995 0 0 0 16 8c0-4.42-3.58-8-8-8Z" />
-    </svg>
-  );
-}
-
 export function Titlebar({
   collapsed,
   onToggleSidebar,
@@ -91,11 +78,6 @@ export function Titlebar({
         icon={<BookOpen size={14} />}
         label={t('common.docs')}
         href="https://swift.readthedocs.io"
-      />
-      <ChromeIconButton
-        icon={<GithubMark />}
-        label="GitHub"
-        href="https://github.com/modelscope/ms-swift"
       />
     </div>
   );

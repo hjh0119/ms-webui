@@ -98,6 +98,11 @@ export interface TurnSubmit {
   pageTools?: PageToolSpec[];
   /** 新会话建档标题（已有会话不传） */
   title?: string;
+  /*
+   * 助手会话的单流标记：历史存固定桶 '*'（与执行模型无关，模型只是下一
+   * 回合的执行者）。首页多模型对比不带——各列仍按模型分桶、上下文独立。
+   */
+  singleStream?: boolean;
   sampling?: { temperature?: number; topP?: number; maxTokens?: number };
   /** 展览模式的会话 token（MS 默认模型；models.json 无 key 时必带） */
   apiKey?: string;
@@ -122,6 +127,8 @@ export interface TurnEvent {
    * arguments 是调用参数的 JSON 串（create_link 例外，载荷是跳转意图对象）。
    */
   call?: { id: string; name: string; arguments: string };
+  /** page-tool：挂起回合的真实执行模型（单流会话切模型后回传仍按它路由） */
+  executor?: string;
   error?: string;
 }
 
@@ -161,8 +168,8 @@ export interface TurnEngineHandle {
   listPendingApprovals(conv: string): TurnApproval[];
   /** 页面回传挂起工具的执行结果（未知 callId 返回 false；结果即工具回喂文本） */
   resolvePageTool(conv: string, model: string, callId: string, result: string): boolean;
-  /** 该列（不给 model 则该会话全部列）挂起中的页面工具调用（页面挂载/重连恢复重放用） */
-  listPendingPageTools(conv: string, model?: string): { id: string; name: string; arguments: string }[];
+  /** 该列（不给 model 则该会话全部列）挂起中的页面工具调用（页面挂载/重连恢复重放用；executor = 真实执行模型） */
+  listPendingPageTools(conv: string, model?: string): { id: string; name: string; arguments: string; executor?: string }[];
   /** 共用白名单（浏览器会话加载时灌进本地允许集，引擎与页面一致放行） */
   listAllowedCommands(): string[];
   /** 浏览器侧决定；approve 且勾了总是允许时把审批自带的命令收进白名单。未知 id 返回 false */
@@ -196,6 +203,7 @@ interface ApprovalsFile {
 function buildTools(
   names: string[],
   conv: string,
+  bucket: string,
   model: string,
   userRequest: string,
   onPendingCreate: (link: CreatedLink) => Promise<string>,
@@ -207,10 +215,10 @@ function buildTools(
     else if (name === 'search_models') out.push(searchModelsTool());
     else if (name === 'env_info') out.push(envInfoTool());
     else if (name === 'read_swift_source') out.push(readSwiftSourceTool());
-    else if (name === 'workspace') out.push(...workspaceTools(conv, model));
-    else if (name === 'research') out.push(...researchTools(conv, model));
+    else if (name === 'workspace') out.push(...workspaceTools(conv, bucket));
+    else if (name === 'research') out.push(...researchTools(conv, bucket));
     else if (name === 'web') out.push(webSearchTool());
-    else if (name === 'home') out.push(...homeTools({ userRequest, conv, model, onPendingCreate }));
+    else if (name === 'home') out.push(...homeTools({ userRequest, conv, model: bucket, onPendingCreate }));
     else if (name.startsWith('task:')) out.push(...moduleTaskTools(name.slice(5) as 'train' | 'eval' | 'export' | 'deploy' | 'script'));
   }
   return out;
@@ -218,9 +226,21 @@ function buildTools(
 
 let currentEpoch = 0;
 
+/** 助手会话的固定桶键：历史与模型无关（单流），模型只是回合执行者 */
+const SINGLE_STREAM_BUCKET = '*';
+
 export function createTurnEngine(deps: TurnEngineDeps): TurnEngineHandle {
   const epoch = ++currentEpoch;
   const isCurrent = (): boolean => epoch === currentEpoch;
+  /*
+   * 桶键解析：只凭提交标记——单流（助手）存 '*'，否则按模型分桶（首页
+   * 对比）。不做「'*' 桶存在即单流」的自动推断：首页打开已迁移的助手
+   * 会话时对比模式仍各列独立，不会误写同一桶。busy/abort/回传不靠推断，
+   * 按实际占锁/挂起条目匹配（见各方法）。存储/锁/审批/page-tool/摘要全
+   * 按桶键；SSE 与模型调用仍用真实模型。
+   */
+  const bucketKeyOf = (model: string, singleStream?: boolean): string =>
+    singleStream ? SINGLE_STREAM_BUCKET : model;
   /*
    * 回合非正常死亡的补偿通知（带每会话 5 分钟冷却）：换代腰斩与同代断流
    * 共用——补偿事件的语义是「续轮」，不是「重跑」，风暴窗口内静默丢弃
@@ -264,8 +284,8 @@ export function createTurnEngine(deps: TurnEngineDeps): TurnEngineHandle {
     if (retired.has(conv)) return;
     deps.appendTurn(conv, model, msg);
   };
-  /** 回合锁：conv\u0000model → turnId（在跑即占用，含审批挂起） */
-  const running = new Map<string, string>();
+  /** 回合锁：conv\u0000桶键 → { turnId, bucket }（在跑即占用，含审批挂起；bucket 供 busy/abort 按真实桶匹配） */
+  const running = new Map<string, { turnId: string; bucket: string }>();
   /** 页面回合的中止通道（唤醒回合不受页面控制，不入此表） */
   const aborters = new Map<string, AbortController>();
   /** SSE 订阅者：conv → 监听集合 */
@@ -318,14 +338,17 @@ export function createTurnEngine(deps: TurnEngineDeps): TurnEngineHandle {
    * 服务换代本就腰斩回合，落盘无意义。create_link 走同一通道：载荷是
    * CreatedLink 跳转意图，页面渲染「前往查看」按钮，点击/稍后再说回传。
    */
-  const pendingPageTools = new Map<string, { resolve: (result: string) => void; name: string; arguments: string }>();
-  const hangPageTool = (conv: string, model: string, name: string, payload: unknown): Promise<string> =>
+  const pendingPageTools = new Map<
+    string,
+    { resolve: (result: string) => void; name: string; arguments: string; executor: string }
+  >();
+  const hangPageTool = (conv: string, bucket: string, model: string, name: string, payload: unknown): Promise<string> =>
     new Promise((resolve) => {
       const callId = randomUUID();
-      const key = `${conv}\u0000${model}\u0000${callId}`;
+      const key = `${conv}\u0000${bucket}\u0000${callId}`;
       const argumentsText = JSON.stringify(payload ?? {});
-      pendingPageTools.set(key, { resolve, name, arguments: argumentsText });
-      broadcast({ type: 'page-tool', conv, model, call: { id: callId, name, arguments: argumentsText } });
+      pendingPageTools.set(key, { resolve, name, arguments: argumentsText, executor: model });
+      broadcast({ type: 'page-tool', conv, model, executor: model, call: { id: callId, name, arguments: argumentsText } });
       /* 换代检测与审批同一形态：1s 一拍，旧实例的挂起等不到回传，按中断结算 */
       const poll = setInterval(() => {
         if (!isCurrent()) {
@@ -339,7 +362,7 @@ export function createTurnEngine(deps: TurnEngineDeps): TurnEngineHandle {
       }, 1000);
     });
   /* 页面提交的工具定义 → 引擎侧 AgentTool：可选审批段在前（拒绝直接回喂），页面执行挂起段在后 */
-  const buildPageTools = (specs: PageToolSpec[], conv: string, model: string): AgentTool[] =>
+  const buildPageTools = (specs: PageToolSpec[], conv: string, bucket: string, model: string): AgentTool[] =>
     specs.map((spec) => ({
       schema: {
         type: 'function' as const,
@@ -350,7 +373,7 @@ export function createTurnEngine(deps: TurnEngineDeps): TurnEngineHandle {
           const ok = await ctx.requestApproval(spec.approval.title, spec.approval.reason);
           if (!ok) return '用户拒绝了本次操作。请继续调整或询问用户意图。';
         }
-        return await hangPageTool(conv, model, spec.name, args);
+        return await hangPageTool(conv, bucket, model, spec.name, args);
       },
     }));
 
@@ -360,7 +383,7 @@ export function createTurnEngine(deps: TurnEngineDeps): TurnEngineHandle {
    * 时新请求顶掉旧的（一张卡原则，与页面 useApproval 的「前一个未决自动拒绝」
    * 同构）。
    */
-  const requestApproval = (conv: string, model: string, bypass: boolean) => (title: string, reason: string, command?: string) =>
+  const requestApproval = (conv: string, bucket: string, bypass: boolean) => (title: string, reason: string, command?: string) =>
     new Promise<boolean>((resolve) => {
       if (bypass) {
         resolve(true);
@@ -370,11 +393,11 @@ export function createTurnEngine(deps: TurnEngineDeps): TurnEngineHandle {
         resolve(true);
         return;
       }
-      approvals.pending = approvals.pending.filter((p) => !(p.conv === conv && p.model === model));
+      approvals.pending = approvals.pending.filter((p) => !(p.conv === conv && p.model === bucket));
       const req: TurnApproval = {
         id: randomUUID(),
         conv,
-        model,
+        model: bucket,
         title,
         reason,
         ...(command ? { command } : {}),
@@ -426,25 +449,28 @@ export function createTurnEngine(deps: TurnEngineDeps): TurnEngineHandle {
       bypassApproval?: boolean;
       /** 调用方已在同步段占用的锁 id（唤醒回合的竞态修复）；不传则本函数自己占 */
       ownedTurnId?: string;
+      /** 存储/锁/挂起用的桶键（单流会话 '*'）；不传回落模型名（首页分桶） */
+      bucketKey?: string;
     },
   ): Promise<void> => {
-    const key = `${conv}\u0000${model}`;
+    const bucket = opts.bucketKey ?? model;
+    const key = `${conv}\u0000${bucket}`;
     const turnId = opts.ownedTurnId ?? randomUUID();
-    running.set(key, turnId);
+    running.set(key, { turnId, bucket });
     if (opts.abortable) aborters.set(key, opts.abortable);
     try {
       broadcast({ type: 'turn-start', conv, model });
-      const bucket = deps.readTurns(conv, model);
-      if (bucket === null) {
+      const bucketHistory = deps.readTurns(conv, bucket);
+      if (bucketHistory === null) {
         /* convs.json 读坏：放弃本回合（不落盘，事件靠下一次 stall 唤醒补） */
         console.log(`[turn] ${conv} turns 读失败，放弃本回合`);
         broadcast({ type: 'turn-done', conv, model, error: 'turns unreadable' });
         return;
       }
-      const dialogue = [...bucket, opts.userMsg];
+      const dialogue = [...bucketHistory, opts.userMsg];
       const compressed = await compressHistory({
         convId: conv,
-        modelId: model,
+        modelId: bucket,
         dialogue,
         ...(opts.apiKey ? { apiKey: opts.apiKey } : {}),
         /* 固定 system（指引/skills 文档）与对话共享上下文预算：阈值要扣掉它 */
@@ -456,7 +482,7 @@ export function createTurnEngine(deps: TurnEngineDeps): TurnEngineHandle {
         return;
       }
       const history: ChatMessage[] = [...opts.system, ...compressed];
-      appendTurn(conv, model, opts.userMsg);
+      appendTurn(conv, bucket, opts.userMsg);
       /* 唤醒回合的合成 user 消息实时进在线页面的视图（页面回合本地已 append，SSE 侧去重） */
       broadcast({ type: 'user', conv, model, message: opts.userMsg });
       let acc = '';
@@ -471,7 +497,7 @@ export function createTurnEngine(deps: TurnEngineDeps): TurnEngineHandle {
           ...(accReasoning ? { reasoning: accReasoning } : {}),
           ...(accToolCalls.length ? { toolCalls: accToolCalls } : {}),
         };
-        appendTurn(conv, model, msg);
+        appendTurn(conv, bucket, msg);
         broadcast({ type: 'assistant', conv, model, message: msg });
         acc = '';
         accReasoning = '';
@@ -483,7 +509,7 @@ export function createTurnEngine(deps: TurnEngineDeps): TurnEngineHandle {
         history,
         tools: opts.tools,
         ctx: {
-          requestApproval: requestApproval(conv, model, opts.bypassApproval === true || approvals.bypassConvs.includes(conv)),
+          requestApproval: requestApproval(conv, bucket, opts.bypassApproval === true || approvals.bypassConvs.includes(conv)),
           allowedCommands: new Set(approvals.allowed),
         },
         sampling: opts.sampling ?? deps.chatDefaults(),
@@ -507,7 +533,7 @@ export function createTurnEngine(deps: TurnEngineDeps): TurnEngineHandle {
           onToolResult: (call, result) => {
             flushAssistant();
             const msg: ChatMessage = { role: 'tool', content: result, toolCallId: call.id };
-            appendTurn(conv, model, msg);
+            appendTurn(conv, bucket, msg);
             broadcast({ type: 'tool', conv, model, message: msg });
           },
           onError: (errorText) => {
@@ -525,7 +551,7 @@ export function createTurnEngine(deps: TurnEngineDeps): TurnEngineHandle {
              */
             notifySevered(conv, model);
             const msg: ChatMessage = { role: 'assistant', content: errorText };
-            appendTurn(conv, model, msg);
+            appendTurn(conv, bucket, msg);
             broadcast({ type: 'error', conv, model, message: msg, error: errorText });
           },
           onNotice: (noticeText) => {
@@ -547,7 +573,7 @@ export function createTurnEngine(deps: TurnEngineDeps): TurnEngineHandle {
       broadcast({ type: 'turn-done', conv, model, error: String(e) });
     } finally {
       /* 按所有权释放：占锁与释放之间可能换代或被顶替，只清自己持有的锁 */
-      if (running.get(key) === turnId) running.delete(key);
+      if (running.get(key)?.turnId === turnId) running.delete(key);
       aborters.delete(key);
     }
   };
@@ -555,7 +581,7 @@ export function createTurnEngine(deps: TurnEngineDeps): TurnEngineHandle {
   return {
     submitTurn(conv, req) {
       for (const m of req.models) {
-        if (running.has(`${conv}\u0000${m}`)) return { error: 'turn in flight' };
+        if (running.has(`${conv}\u0000${bucketKeyOf(m, req.singleStream)}`)) return { error: 'turn in flight' };
       }
       /* 页面工具回传面按「列 × callId」索引，多模型无法路由——单模型才受理 */
       if (req.pageTools?.length && req.models.length !== 1) return { error: 'page tools require a single model' };
@@ -571,17 +597,19 @@ export function createTurnEngine(deps: TurnEngineDeps): TurnEngineHandle {
         saveApprovals();
       }
       for (const m of req.models) {
+        const bucket = bucketKeyOf(m, req.singleStream);
         const abortable = new AbortController();
         void runTurnCore(conv, m, {
           userMsg: { role: 'user', content: req.text, ...(req.images?.length ? { images: req.images } : {}) },
           system: req.system.map((content) => ({ role: 'system' as const, content })),
           tools: [
-            ...buildTools(req.tools, conv, m, req.text, (link) => hangPageTool(conv, m, 'create_link', link)),
-            ...(req.pageTools?.length ? buildPageTools(req.pageTools, conv, m) : []),
+            ...buildTools(req.tools, conv, bucket, m, req.text, (link) => hangPageTool(conv, bucket, m, 'create_link', link)),
+            ...(req.pageTools?.length ? buildPageTools(req.pageTools, conv, bucket, m) : []),
           ],
           label: 'page',
           sampling: req.sampling,
           abortable,
+          bucketKey: bucket,
           ...(req.apiKey ? { apiKey: req.apiKey } : {}),
           ...(req.noApproval ? { bypassApproval: true } : {}),
         });
@@ -595,10 +623,13 @@ export function createTurnEngine(deps: TurnEngineDeps): TurnEngineHandle {
        * 空闲、执行时双写」。prepare 只在占锁成功后调用：返回 false 时事件
        * 未被取走（调用方留待下一拍），唤醒事件零丢失。
        */
-      const key = `${conv}\u0000${model}`;
+      /* 唤醒回合无提交标记：会话已有 '*' 桶（助手单流）则续进该桶，不分裂新桶 */
+      const singleBucket = deps.readTurns(conv, SINGLE_STREAM_BUCKET);
+      const bucket = singleBucket !== null && singleBucket.length ? SINGLE_STREAM_BUCKET : model;
+      const key = `${conv}\u0000${bucket}`;
       if (running.has(key)) return false;
       const turnId = randomUUID();
-      running.set(key, turnId);
+      running.set(key, { turnId, bucket });
       void (async () => {
         let text = '';
         try {
@@ -608,7 +639,7 @@ export function createTurnEngine(deps: TurnEngineDeps): TurnEngineHandle {
         }
         if (!text) {
           /* 事件被并发取走或取走失败：释放锁退出（事件源头自行兜底重放） */
-          if (running.get(key) === turnId) running.delete(key);
+          if (running.get(key)?.turnId === turnId) running.delete(key);
           return;
         }
         /*
@@ -640,13 +671,15 @@ export function createTurnEngine(deps: TurnEngineDeps): TurnEngineHandle {
           tools: buildTools(
             ['read_skill', 'list_catalog', 'env_info', 'read_swift_source', 'workspace', 'research', 'home'],
             conv,
+            bucket,
             model,
             text,
             /* 唤醒回合的 create_* 同样走挂起：页面回来后重放按钮，模型能等到用户决定 */
-            (link) => hangPageTool(conv, model, 'create_link', link),
+            (link) => hangPageTool(conv, bucket, model, 'create_link', link),
           ),
           label: 'wakeup',
           ownedTurnId: turnId,
+          bucketKey: bucket,
         });
       })();
       return true;
@@ -661,7 +694,11 @@ export function createTurnEngine(deps: TurnEngineDeps): TurnEngineHandle {
       };
     },
     busy(conv, model) {
-      return running.has(`${conv}\u0000${model}`);
+      /* 按真实占锁桶匹配：单流回合（'*'）对任何模型的查询都算在跑 */
+      for (const [key, entry] of running) {
+        if (key.startsWith(`${conv}\u0000`) && (entry.bucket === model || entry.bucket === SINGLE_STREAM_BUCKET)) return true;
+      }
+      return false;
     },
     busyConv(conv) {
       for (const key of running.keys()) if (key.startsWith(`${conv}\u0000`)) return true;
@@ -675,15 +712,23 @@ export function createTurnEngine(deps: TurnEngineDeps): TurnEngineHandle {
       return out;
     },
     abortTurn(conv, model) {
-      aborters.get(`${conv}\u0000${model}`)?.abort();
-      /* 停止连带结算该列挂起的审批：pending 消失即引擎轮询按拒绝收尾，未开始的工具不再执行 */
+      /* 中止该会话里匹配的全部在跑列：同模型桶 + 单流 '*' 桶（停止按钮不关心执行者是谁） */
+      const buckets = new Set<string>();
+      for (const [key, entry] of running) {
+        if (key.startsWith(`${conv}\u0000`) && (entry.bucket === model || entry.bucket === SINGLE_STREAM_BUCKET)) {
+          aborters.get(key)?.abort();
+          buckets.add(entry.bucket);
+        }
+      }
+      /* 停止连带结算挂起的审批：pending 消失即引擎轮询按拒绝收尾，未开始的工具不再执行 */
       const before = approvals.pending.length;
-      approvals.pending = approvals.pending.filter((p) => !(p.conv === conv && p.model === model));
+      approvals.pending = approvals.pending.filter((p) => !(p.conv === conv && buckets.has(p.model)));
       if (approvals.pending.length !== before) saveApprovals();
       /* 页面工具挂起同样结算：不结算则回合永远挂在 await 上，按钮/卡片永不消失 */
-      const prefix = `${conv}\u0000${model}\u0000`;
       for (const [key, entry] of [...pendingPageTools]) {
-        if (key.startsWith(prefix)) {
+        if (!key.startsWith(`${conv}\u0000`)) continue;
+        const bucket = key.slice(conv.length + 1).split('\u0000')[0];
+        if (buckets.has(bucket)) {
           pendingPageTools.delete(key);
           entry.resolve(`用户停止了回合，页面工具 ${entry.name} 未执行。`);
         }
@@ -697,25 +742,24 @@ export function createTurnEngine(deps: TurnEngineDeps): TurnEngineHandle {
       return approvals.pending.filter((p) => p.conv === conv);
     },
     resolvePageTool(conv, model, callId, result) {
-      const entry = pendingPageTools.get(`${conv}\u0000${model}\u0000${callId}`);
-      if (!entry) return false;
-      pendingPageTools.delete(`${conv}\u0000${model}\u0000${callId}`);
-      entry.resolve(result);
-      return true;
+      /* callId 是 UUID 全局唯一：按 conv + callId 定位，不依赖桶键推断（切模型后仍可结算） */
+      const suffix = `\u0000${callId}`;
+      for (const [key, entry] of pendingPageTools) {
+        if (key.startsWith(`${conv}\u0000`) && key.endsWith(suffix)) {
+          pendingPageTools.delete(key);
+          entry.resolve(result);
+          return true;
+        }
+      }
+      return false;
     },
     listPendingPageTools(conv, model) {
-      const prefix = model ? `${conv}\u0000${model}\u0000` : `${conv}\u0000`;
-      const out: { id: string; name: string; arguments: string; model?: string }[] = [];
+      /* 不给 model 返回该会话全部挂起；给了则按真实执行模型过滤（executor 随条目返回） */
+      const out: { id: string; name: string; arguments: string; executor?: string }[] = [];
       for (const [key, entry] of pendingPageTools) {
-        if (key.startsWith(prefix)) {
-          /* 不给 model 时连带列名（页面重连后列名未知，需自己分桶） */
-          const rest = key.slice(prefix.length);
-          out.push(
-            model
-              ? { id: rest, name: entry.name, arguments: entry.arguments }
-              : { id: rest.split('\u0000')[1], name: entry.name, arguments: entry.arguments, model: rest.split('\u0000')[0] },
-          );
-        }
+        if (!key.startsWith(`${conv}\u0000`)) continue;
+        if (model && entry.executor !== model) continue;
+        out.push({ id: key.split('\u0000')[2], name: entry.name, arguments: entry.arguments, executor: entry.executor });
       }
       return out;
     },

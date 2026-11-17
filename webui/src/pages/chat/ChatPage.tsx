@@ -1366,7 +1366,8 @@ export function ChatPage() {
     void fetchPendingPageTools(conv).then((calls) => {
       for (const c of calls) {
         if (c.name !== 'create_link') continue;
-        const m = c.model;
+        /* executor = 挂起回合的真实执行模型（首页分桶下即列名） */
+        const m = c.executor;
         if (!m) continue;
         try {
           const link = JSON.parse(c.arguments) as CreatedLink;
@@ -1677,12 +1678,16 @@ export function ChatPage() {
 
   /*
    * 回首页：清 conv 参数并退出会话态。URL 本就无 query 时（经「历史对话」按钮
-   * 进入的会话态）setSearchParams 不触发变化，靠手动收状态兜底。
+   * 进入的会话态）setSearchParams 不触发变化，靠手动收状态兜底。对比开关一并
+   * 复位——hero 态只有一个大输入框，没有任何模式指示，残留的 compare 会让首发
+   * 静默走多列（用户以为在跟单个模型对话，实则进了对比页）。要对比再点开关，
+   * 开关在会话态页头始终可见可切。
    */
   const goHome = () => {
     setSearchParams({});
     setActiveConv('');
     setStarted(false);
+    setCompare(false);
   };
 
   /* 删除一段对话（确认弹窗在列表组件里）：注册表、「最近」、消息本体（含摘要）三处同步清理；
@@ -1737,11 +1742,30 @@ export function ChatPage() {
           <Composer big placeholder={t(DEFAULT_PROMPT_KEY)} state={composer} />
         </div>
         {/*
-          固定的一句定位语：双框架共用的工作台。刻意不展开品牌细节——
-          这里要传达的是「swift 与 twinkle 都归这套 UI 管」，而非让用户分心去想两者的关系。
+          固定的一句定位语：双框架共用的工作台。产品名本身就是入口——链到
+          modelscope 组织下的两个仓库；这套 UI 是共用工作站，单一 GitHub 按钮
+          只能指向一个产品，所以入口收敛在这行字里而不是 titlebar。
         */}
         <div className="text-muted-foreground text-xs">
-          {t('chat.positioning')}
+          {t('chat.positioningPre')}
+          <a
+            className="underline underline-offset-2 hover:text-foreground"
+            href="https://github.com/modelscope/ms-swift"
+            target="_blank"
+            rel="noreferrer"
+          >
+            swift
+          </a>
+          {t('chat.positioningMid')}
+          <a
+            className="underline underline-offset-2 hover:text-foreground"
+            href="https://github.com/modelscope/twinkle"
+            target="_blank"
+            rel="noreferrer"
+          >
+            twinkle
+          </a>
+          {t('chat.positioningPost')}
         </div>
       </div>
     );

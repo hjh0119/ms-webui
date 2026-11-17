@@ -1,22 +1,25 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { Bot, Paperclip, X } from 'lucide-react';
-import { listModels, type ChatMessage, type ModelConfig } from '@/api/models';
+import { listModels, listMsModels, type ChatMessage, type ModelConfig } from '@/api/models';
 import { pushChat, useChats } from '@/store/chats';
+import { writePrefill } from '@/store/prefill';
+import { useSettings } from '@/settings/SettingsContext';
 import { useT, type MessageKey } from '@/i18n';
 import {
   submitTurn,
   openTurnLive,
   abortTurn,
-  fetchConvBuckets,
+  fetchConvHistory,
   fetchPendingPageTools,
   resolvePageTool,
-  moveConvBuckets,
   type PageToolSpec,
 } from '@/api/turns';
 import { listSkills, buildSkillsSystem } from '@/api/skills';
 import { CONFIG_ASSISTANT_GUIDE } from '@/agent/builtin';
+import type { CreatedLink } from '@/agent/taskTools';
 import { normalizeImage } from './attachments';
-import { AiChatPanel, messageId, reconcileEngineMessages, toEngineDisplay, userMessage, type AiMessage } from './AiChatPanel';
+import { AiChatPanel, messageId, reconcileEngineMessages, toEngineDisplay, userMessage, type AiMessage, type ActionState } from './AiChatPanel';
 import { EngineApprovalCard } from './EngineApprovalCard';
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from './ui/sheet';
 import { SelectInput } from './FormField';
@@ -32,10 +35,11 @@ import { MODULES } from '@/theme/modules';
  *   （pageTools），执行体留在页面——引擎挂起上抛（SSE page-tool 事件），
  *   页面执行后回传续轮。ActionCard 逐条确认的哲学不变。
  *
- * 会话与首页 ChatPage 同一套存储（chats 注册表 + swift-webui-turns 分桶）：
- * 顶部下拉可选首页任一会话加载消息本体继续聊，写回同一分桶——会话在
- * 首页与各页之间流动。默认新会话（无上下文）。新建页配置助手随回合注入
- * skills 索引与 swift 源码/环境工具（填 swift CLI 参数的知识面）。
+ * 会话与首页 ChatPage 同一套存储（chats 注册表 + convs.json）：助手会话是
+ * 单流——历史与模型无关（固定 '*' 桶），模型只是下一回合的执行者；顶部
+ * 下拉可选任一会话加载消息本体继续聊——会话在首页与各页之间流动。默认
+ * 新会话（无上下文）。新建页配置助手随回合注入 skills 索引与 swift 源码/
+ * 环境工具（填 swift CLI 参数的知识面）。
  */
 
 /** 助手能读、能改的一个表单字段（key 与 CLI flag / 表单 key 同名） */
@@ -60,14 +64,21 @@ export interface ConfigField {
   scopeNote?: string;
 }
 
-/** set_form_fields 的一条提议：把某个字段改成某个值 */
+/** set_form_fields 的一条提议：把某个字段改成某个值；link 形态是 create_link 上抛的跳转意图卡 */
 export interface ConfigAction {
   key: string;
   to: string;
+  /** 跳转意图卡（首页发起的 create_* 被带到本面板）：应用 = 前往查看（跳转+预填），忽略 = 稍后再说 */
+  link?: CreatedLink;
+  /** link 卡对应的挂起调用 id（用户决定时回传引擎续轮） */
+  callId?: string;
 }
 
 /** 提议在卡片上的样子：字段名和当前值都得摆出来，用户才知道自己点的是什么 */
 export function describeConfigAction(a: ConfigAction, fields: ConfigField[], t: (key: MessageKey, vars?: Record<string, string | number>) => string) {
+  if (a.link) {
+    return { label: t('assistant.linkActLabel', { label: a.link.label }) };
+  }
   const f = fields.find((x) => x.key === a.key);
   const cur = f?.value;
   return {
@@ -131,18 +142,20 @@ export function PageAssistant({
   confirmBeforeApply: boolean;
   /** 开场白覆盖（首页 AI 创建工具跳转而来时传需求复述 + 已填概览） */
   intro?: string;
-  /** 发起创建的首页会话 id（AI 预填跳转）：挂载即加载该会话的 turns 桶续聊 */
+  /** 发起创建的首页会话 id（AI 预填跳转）：挂载即加载该会话的历史续聊 */
   initialConv?: string;
-  /** 发起创建的模型 id：turns 按会话 × 模型分桶，续聊要加载对应桶 */
+  /** 发起创建时的执行模型（只是初始选中项，历史与模型无关） */
   initialModel?: string;
 }) {
   const { t } = useT();
+  const { settings, update } = useSettings();
   const label = t(MODULES[module].label);
+  const navigate = useNavigate();
   const [modelConfigs, setModelConfigs] = useState<ModelConfig[]>([]);
-  const [model, setModel] = useState(initialModel ?? '');
+  const [model, setModel] = useState(initialModel ?? settings.aiModel ?? '');
   const chats = useChats();
   /*
-   * 当前会话：'' = 新会话（无上下文）；否则是 turns 分桶的会话 id。
+   * 当前会话：'' = 新会话（无上下文）；否则是单流历史的会话 id。
    * AI 预填跳转带着首页会话过来时直接续聊那段对话——「打开的对话」就是
    * 用户在首页的那段，而不是一个凭空的空会话。
    */
@@ -155,6 +168,9 @@ export function PageAssistant({
    * （fields 的值与 active 判据捕获的形态键都随渲染变，读旧快照会让虚拟形态算错） */
   const onSubmitRef = useRef(onSubmit);
   onSubmitRef.current = onSubmit;
+  /* create_link 免确认分支读的是最新设置（SSE 回调闭包会过期，同 onSubmitRef） */
+  const confirmBeforeApplyRef = useRef(confirmBeforeApply);
+  confirmBeforeApplyRef.current = confirmBeforeApply;
   const fieldsRef = useRef(fields);
   fieldsRef.current = fields;
   const [draft, setDraft] = useState('');
@@ -165,6 +181,8 @@ export function PageAssistant({
   const [skillsSystem, setSkillsSystem] = useState('');
   /* 页面工具调用去重：SSE 实时帧与恢复重放共用（callId 首见才执行） */
   const seenPageCalls = useRef(new Set<string>());
+  /* 挂起调用的真实执行模型（callId → executor）：切模型后卡片回传仍按它路由 */
+  const pageToolExecutors = useRef(new Map<string, string>());
   /* 停止键：中止 server 侧本列回合（引擎 abort 连带结算挂起的审批与页面工具）；stopping 期按钮转圈 */
   const [stopping, setStopping] = useState(false);
   useEffect(() => {
@@ -186,25 +204,51 @@ export function PageAssistant({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [Boolean(fields)]);
 
+  /* 模型清单与首页/编排页同源：本地 models.json + 配了 MS 令牌时官方默认
+   * 模型前置合并（它们不在 models.json，发送随回合带 token 鉴权） */
+  const msToken = settings.msToken;
+  const [msModelIds, setMsModelIds] = useState<Set<string>>(new Set());
   useEffect(() => {
-    listModels()
-      .then((configs) => {
-        setModelConfigs(configs);
-        setModel((prev) => prev || configs[0]?.id || '');
-      })
-      .catch(() => {
+    void (async () => {
+      try {
+        const [configs, ms] = await Promise.all([
+          listModels(),
+          msToken ? listMsModels().catch(() => null) : Promise.resolve(null),
+        ]);
+        const msConfigs: ModelConfig[] = (ms?.models ?? []).map((m) => ({
+          id: m.model,
+          baseUrl: 'https://api-inference.modelscope.cn/v1',
+          model: m.model,
+        }));
+        setMsModelIds(new Set(msConfigs.map((c) => c.id)));
+        const merged = [...msConfigs, ...configs];
+        setModelConfigs(merged);
+        setModel((prev) => prev || ms?.default || merged[0]?.id || '');
+      } catch {
         /* 模型清单不可达：选择器显示无可用模型，发送被拦 */
-      });
-  }, []);
-
-  /* AI 预填跳转带来的续聊：挂载即从 server 加载该（会话 × 模型）桶 */
+      }
+    })();
+  }, [msToken]);
+  /* 模型选择全局记忆（与编排页助手同一份 settings.aiModel）：页面指定的
+   * initialModel（创建意图预填）优先，不被记忆覆盖 */
   useEffect(() => {
-    if (!initialConv || !initialModel) return;
-    void fetchConvBuckets(initialConv).then((buckets) => {
-      restoreConversation(buckets[initialModel] ?? []);
+    if (initialModel) return;
+    if (settings.aiModel && modelConfigs.some((c) => c.id === settings.aiModel)) {
+      setModel(settings.aiModel);
+    }
+  }, [settings.aiModel, modelConfigs, initialModel]);
+
+  /* 挂载/切会话即从 server 拉回单流历史（引擎单写者落盘，刷新不丢）；
+   * 首发建档引起的 convId 变化也走这里：桶还空时不动本地乐观消息 */
+  useEffect(() => {
+    if (!convId) return;
+    const conv = convId;
+    void fetchConvHistory(conv).then((history) => {
+      if (!history.length) return;
+      setMessages((ms) => reconcileEngineMessages(ms, history, toDisplay));
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [convId]);
 
   /* 首次打开给开场白：有覆盖（AI 预填跳转）用覆盖，否则按场景给默认 */
   useEffect(() => {
@@ -242,7 +286,7 @@ export function PageAssistant({
     }
   };
 
-  /* 切会话：目标从 server 桶加载 */
+  /* 切会话：目标从 server 单流历史加载 */
   const switchConv = (id: string) => {
     if (streaming) return;
     setConvId(id);
@@ -251,35 +295,16 @@ export function PageAssistant({
       restoreConversation([]);
       return;
     }
-    void fetchConvBuckets(id).then((buckets) => {
-      restoreConversation(buckets[model] ?? []);
+    void fetchConvHistory(id).then((history) => {
+      restoreConversation(history);
     });
   };
 
-  /*
-   * 切模型：与首页同语义——目标模型桶空时把当前桶搬过去，聊天记录跟着
-   * 模型走（不搬的话目标桶是空的，记录被开场白顶掉）；目标桶已有消息则
-   * 换到那条流（频道语义，各模型上下文独立）。无会话时没有桶可搬，直换。
-   */
+  /* 切模型：模型只是下一回合的执行者，历史不动（单流会话与模型无关） */
   const switchModel = (id: string) => {
     if (streaming || !id || id === model) return;
-    seenPageCalls.current.clear();
-    if (!convId) {
-      setModel(id);
-      return;
-    }
-    const from = model;
-    void (async () => {
-      const buckets = await fetchConvBuckets(convId);
-      if ((buckets[id] ?? []).length) {
-        setModel(id);
-        restoreConversation(buckets[id] ?? []);
-        return;
-      }
-      /* 桶搬完再切：消息本体不动，界面记录原样保留 */
-      await moveConvBuckets(convId, from, id);
-      setModel(id);
-    })();
+    setModel(id);
+    update('aiModel', id);
   };
 
   /*
@@ -289,9 +314,16 @@ export function PageAssistant({
    * 引擎先行完成，页面段只执行提交。恢复重放时 submit_form 不重执行——防
    * 刷新造成双重提交，改回执请用户在页面上点启动。
    */
-  const runPageTool = async (call: { id: string; name: string; arguments: string }, replay: boolean) => {
+  const runPageTool = async (
+    call: { id: string; name: string; arguments: string },
+    replay: boolean,
+    executor?: string,
+  ) => {
     if (seenPageCalls.current.has(call.id)) return;
     seenPageCalls.current.add(call.id);
+    /* 记住真实执行模型：用户之后切了模型，卡片决定时回传仍按它路由 */
+    const exec = executor ?? model;
+    pageToolExecutors.current.set(call.id, exec);
     let result = '';
     if (call.name === 'set_form_fields') {
       result = await proposeFormFields(call.arguments);
@@ -299,31 +331,66 @@ export function PageAssistant({
       result = replay
         ? '页面刷新中断了提交动作；为避免重复提交未自动重执行，请用户在页面上直接点启动按钮完成。'
         : await triggerSubmit();
+    } else if (call.name === 'create_link') {
+      /*
+       * 首页发起的创建意图被带到本面板（会话在首页与各页间流动，挂起随
+       * 续聊/重放过来）：不再当「未知工具」报错——出一张跳转卡（应用 = 前往
+       * 查看并预填、忽略 = 稍后再说），用户决定时才回传续轮，与首页
+       * pendingLinks 同语义。confirmBeforeApply 关闭时没有确认可点，直接落
+       * 预填跳转（该设置的语义就是「别问直接干」）。
+       */
+      let link: CreatedLink | null = null;
+      try {
+        const parsed = JSON.parse(call.arguments || '{}') as CreatedLink;
+        if (parsed && parsed.to && parsed.module) link = parsed;
+      } catch {
+        link = null;
+      }
+      if (!link) {
+        result = '跳转意图载荷损坏；请重新调 create_* 生成新的跳转。';
+      } else if (!confirmBeforeApplyRef.current) {
+        writePrefill(link.module, link.payload);
+        navigate(link.to);
+        result = `用户开启了免确认：已自动落预填并跳转到 ${link.to}，目标页的助手会带着这段对话续聊。`;
+      } else {
+        setMessages((ms) => [
+          ...ms,
+          {
+            id: messageId(),
+            role: 'assistant',
+            text: t('assistant.linkCardText', { label: link.label }),
+            actions: [{ key: link.to, to: link.to, link, callId: call.id }],
+            states: ['pending' as ActionState],
+          },
+        ]);
+        /* 挂起等用户决定（点击/稍后时 resolve），不回传结束 */
+        return;
+      }
     } else {
       result = `未知页面工具 ${call.name}（本面板未注册它的执行体）。`;
     }
-    await resolvePageTool(convId, model, call.id, result);
+    await resolvePageTool(convId, exec, call.id, result);
   };
   
   /*
-   * 引擎回合增量订阅（SSE）：单写者架构的观看面，与首页 ChatPage 同构。
-   * 单列会话——只认当前模型的事件；事件直接 patch messages（渲染缓存），
-   * 引擎落盘的消息是唯一真相，turn-done 时拉单会话桶对账兑底（丢帧/重连
-   * 后补齐）。streaming 态同源维护：首连 sync 事件恢复（重开面板/切会话后
-   * 回合可能还在跑）；挂起中的页面工具随重连重放（卡片回来，回合继续）。
+   * 引擎回合增量订阅（SSE）：单写者架构的观看面。单流会话——只按会话
+   * 过滤（模型只是执行者，事件不再按模型筛）；事件直接 patch messages
+   * （渲染缓存），引擎落盘的消息是唯一真相，turn-done 时拉单流历史对账
+   * 兜底（丢帧/重连后补齐）。streaming 态同源维护：首连 sync 事件恢复
+   * （重开面板/切会话后回合可能还在跑）；挂起中的页面工具随重连重放。
    */
   useEffect(() => {
     if (!convId) return;
     const conv = convId;
     /* 挂起恢复：重连时重放挂起中的页面工具调用（重出卡片/按钮，防丢帧后挂死） */
-    void fetchPendingPageTools(conv, model).then((calls) => {
-      for (const c of calls) void runPageTool(c, true);
+    void fetchPendingPageTools(conv).then((calls) => {
+      for (const c of calls) void runPageTool(c, true, c.executor);
     });
     const close = openTurnLive(conv, (ev) => {
-      if (ev.conv !== conv || ev.model !== model) return;
+      if (ev.conv !== conv) return;
       switch (ev.type) {
         case 'sync':
-          setStreaming((ev.models ?? []).includes(model));
+          setStreaming((ev.models ?? []).length > 0);
           return;
         case 'turn-start':
           setStreaming(true);
@@ -360,7 +427,7 @@ export function PageAssistant({
         case 'page-tool': {
           /* 引擎上抛的挂起工具调用：页面执行（出卡/提交）后回传续轮 */
           if (!ev.call) return;
-          void runPageTool(ev.call, false);
+          void runPageTool(ev.call, false, ev.executor);
           return;
         }
         case 'assistant':
@@ -386,18 +453,17 @@ export function PageAssistant({
         }
         case 'turn-done':
           setStreaming(false);
-          /* 对账兑底：桶拉回重建，本地未决卡片插回（否则确认面被抹掉） */
-          void fetchConvBuckets(conv).then((buckets) => {
-            const bucket = buckets[model] ?? [];
-            if (!bucket.length) return;
-            setMessages((prev) => reconcileEngineMessages(prev, bucket, toDisplay));
+          /* 对账兜底：单流历史拉回重建，本地未决卡片插回（否则确认面被抹掉） */
+          void fetchConvHistory(conv).then((history) => {
+            if (!history.length) return;
+            setMessages((prev) => reconcileEngineMessages(prev, history, toDisplay));
           });
           return;
       }
     });
     return close;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [convId, model]);
+  }, [convId]);
 
   /*
    * 引擎回合的审批面：任务工具（stop_task / delete_task / flow_control 等）
@@ -665,6 +731,29 @@ export function PageAssistant({
 
   const handleAction = (msgId: string, index: number, next: 'applied' | 'ignored') => {
     const action = messages.find((m) => m.id === msgId)?.actions?.[index];
+    /*
+     * 跳转意图卡：应用 = 前往查看（落预填 + 跳转），忽略 = 稍后再说（按钮
+     * 沉没、意图不再阻断对话）；两种结局都回传引擎续轮（挂起由此结算），
+     * 语义与首页 pendingLinks 一致。
+     */
+    if (action?.link && action.callId) {
+      if (next === 'applied') {
+        writePrefill(action.link.module, action.link.payload);
+        navigate(action.link.to);
+      }
+      void resolvePageTool(
+        convId,
+        pageToolExecutors.current.get(action.callId) ?? model,
+        action.callId,
+        next === 'applied'
+          ? `用户已点击跳转到 ${action.link.to}，表单已按上述参数预填；目标页的 AI 助手会带着这段对话续聊，后续引导交给它。`
+          : '用户暂不跳转（稍后再说）；跳转未发生，不要声称已跳转或已预填。',
+      );
+      setMessages((ms) =>
+        ms.map((m) => (m.id === msgId ? { ...m, states: m.states?.map((s, i) => (i === index ? next : s)) } : m)),
+      );
+      return;
+    }
     const target = action ? fields?.find((f) => f.key === action.key) : undefined;
     /* 回写走字段自带的 setter；字段已消失或只读时不能假装成功——按未应用处理 */
     if (next === 'applied' && action && target?.apply) {
@@ -715,6 +804,9 @@ export function PageAssistant({
         : (toolNames ?? []),
       ...(pageToolSpecs.length ? { pageTools: pageToolSpecs } : {}),
       ...(isNew ? { title } : {}),
+      /* 单流：历史与模型无关；MS 官方模型不在 models.json，令牌随回合鉴权 */
+      singleStream: true,
+      ...(msModelIds.has(model) && msToken ? { apiKey: msToken } : {}),
     });
     if ('error' in r) {
       setStreaming(false);
@@ -758,8 +850,8 @@ export function PageAssistant({
         </SheetHeader>
 
         {/*
-          模型与会话两枚下拉 + 多模态附件入口：模型决定回答来源与 turns 分桶；会话默认新开，
-          可选首页任一会话续聊（历史随对话发送，写回同一分桶）。回形针选图（压缩到
+          模型与会话两枚下拉 + 多模态附件入口：模型只是下一回合的执行者（历史
+          与模型无关）；会话默认新开，可选任一会话续聊。回形针选图（压缩到
           多模态有效分辨率）随回合提交——选文件必须由用户手势触发，input 用完重置
           否则同一张图二次选择不触发 onChange。
         */}

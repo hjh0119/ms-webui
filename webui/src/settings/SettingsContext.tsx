@@ -51,6 +51,8 @@ export interface Settings {
    * AI 静默改图会让「谁把 lr 调成 1e-3 的」变成查不出来的事。
    */
   aiConfirmBeforeApply: boolean;
+  /** 助手模型选择（全局记住）：空 = 未选过，回落 MS 默认或清单第一个；各页助手共用 */
+  aiModel: string;
   /** 节点跑完自动弹出输出面板 */
   autoOpenOutput: boolean;
   /**
@@ -77,6 +79,7 @@ const DEFAULTS: Settings = {
   theme: 'system',
   aiEnabled: true,
   aiConfirmBeforeApply: true,
+  aiModel: '',
   autoOpenOutput: false,
   msToken: '',
   pythonPath: null,
