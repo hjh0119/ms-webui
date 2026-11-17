@@ -118,11 +118,12 @@ const COLORS = {
  */
 const UI_EXTRAS: Record<string, UiExtras> = {
   model: {
-    category: 'wf.catInput', labelKey: 'wf.nodePolicyModel', color: COLORS.input, icon: <Brain />,
+    category: 'wf.catInput', labelKey: 'wf.nodeModel', color: COLORS.input, icon: <Brain />,
     hint: 'wf.hintPolicyModel',
   },
   dataset: {
     category: 'wf.catInput', labelKey: 'wf.nodeDataset', color: COLORS.data, icon: <Database />,
+    hint: 'wf.hintDataset',
   },
   dataloader: {
     category: 'wf.catInput', labelKey: 'wf.nodeDataloader', color: COLORS.data, icon: <Layers />, runnable: true,
@@ -146,6 +147,7 @@ const UI_EXTRAS: Record<string, UiExtras> = {
   },
   score: {
     category: 'wf.catRewardAdv', color: COLORS.reward, icon: <Sigma />, runnable: true,
+    hint: 'wf.hintScore',
   },
   scorer: {
     category: 'wf.catRewardAdv', labelKey: 'wf.nodeRewardScorer', color: COLORS.reward, icon: <Scale />,
@@ -157,12 +159,15 @@ const UI_EXTRAS: Record<string, UiExtras> = {
   },
   group_rule: {
     category: 'wf.catRewardAdv', color: COLORS.reward, icon: <Scale />,
+    hint: 'wf.hintGroupRule',
   },
   model_forward: {
     category: 'wf.catRewardAdv', color: COLORS.adv, icon: <TrendingUp />, runnable: true,
+    hint: 'wf.hintModelForward',
   },
   privileged_view: {
     category: 'wf.catRewardAdv', color: COLORS.adv, icon: <Layers />, runnable: true,
+    hint: 'wf.hintPrivilegedView',
   },
   advantage: {
     category: 'wf.catRewardAdv', labelKey: 'wf.nodeAdvantage', color: COLORS.adv, icon: <TrendingUp />, runnable: true,
@@ -170,6 +175,7 @@ const UI_EXTRAS: Record<string, UiExtras> = {
   },
   signal_combine: {
     category: 'wf.catRewardAdv', color: COLORS.adv, icon: <GitMerge />,
+    hint: 'wf.hintSignalCombine',
   },
   select: {
     category: 'wf.catRewardAdv', labelKey: 'wf.nodeTrajFilter', color: COLORS.adv, icon: <Filter />, runnable: true,
@@ -184,10 +190,12 @@ const UI_EXTRAS: Record<string, UiExtras> = {
     hint: 'wf.hintWeightSync',
   },
   weight_average: {
-    category: 'wf.catLoop', color: COLORS.loop, icon: <RefreshCw />,
+    category: 'wf.catLoop', labelKey: 'wf.nodeWeightAverage', color: COLORS.loop, icon: <RefreshCw />,
+    hint: 'wf.hintWeightAverage',
   },
   checkpoint: {
     category: 'wf.catAfter', color: COLORS.after, icon: <CloudUpload />,
+    hint: 'wf.hintCheckpoint',
   },
   toolset: {
     category: 'wf.catAgentEnv', labelKey: 'wf.nodeToolset', color: COLORS.agent, icon: <Wrench />,
@@ -207,6 +215,7 @@ const UI_EXTRAS: Record<string, UiExtras> = {
   },
   merge: {
     category: 'wf.catAfter', labelKey: 'wf.nodeMerge', color: COLORS.after, icon: <GitMerge />, runnable: true,
+    hint: 'wf.hintMerge',
   },
   infer: {
     category: 'wf.catAfter', labelKey: 'wf.nodeInfer', color: COLORS.after, icon: <Layers />, runnable: true,

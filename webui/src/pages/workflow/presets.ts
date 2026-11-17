@@ -40,9 +40,14 @@ const N = (id: string, type: string, x: number, y: number, params?: GraphNode['p
 
 const P = (label: string, value: string) => ({ label, value });
 
-/* 主链 x 坐标刻度与资源列 y 坐标刻度（沿用既有版式） */
+/* 主链 x 坐标刻度与资源列 y 坐标刻度。y 刻度按真实卡高排（model 315px、
+ * sampler 220px）：行距 260 才不重叠。辅助行约定：loss 在训练卡正下方
+ * y=500（train_step 全参视图高 460），weight_sync 在底部 y=760，回环 CTRL
+ * 走列间空隙与底部空带，不穿卡。advantage/select 沉到 y=260、scorer 升到
+ * score 上方 y=-280：让出主链中段的纵向走廊，policy→train 的长 model 边
+ * 从空档穿过，不压 advantage 卡。 */
 const X = [0, 262, 524, 786, 1048, 1310, 1572, 1834, 2096];
-const Y = [330, 560, 790, 1020, 1250, 1480];
+const Y = [500, 760, 1140, 1520];
 
 const TOKENIZER = 'Qwen/Qwen3.5-4B';
 const DATASET = '["AI-MO/NuminaMath-TIR"]';
@@ -74,19 +79,20 @@ const GRPO: Preset = {
   label: 'wf.presetGrpo',
   desc: 'wf.presetGrpoDesc',
   nodes: [
-    N('g_data', 'dataset', X[0], 0, [P('dataset', DATASET)]),
-    N('g_loader', 'dataloader', X[0], 260, [P('batch_size', '4')]),
+    N('g_data', 'dataset', X[0], Y[2], [P('dataset', DATASET)]),
+    N('g_loader', 'dataloader', X[0], Y[2] + 160, [P('batch_size', '4')]),
     N('g_driver', 'streaming_driver', X[1], 0, [P('tokenizer', TOKENIZER), P('template_config', TEMPLATE), P('rl_config', COMPLETION), P('async_mode', 'none'), P('max_staleness', '0'), P('num_generations', '4')]),
     N('g_score', 'score', X[2], 0),
-    N('g_adv', 'advantage', X[3], 0, [P('estimator', 'grpo'), P('num_generations', '4')]),
-    N('g_train', 'train_step', X[4], 0, [P('tokenizer', TOKENIZER), P('template_config', TEMPLATE), P('lr', '1e-4'), P('gradient_accumulation_steps', '1'), P('micro_batch_size', '4')]),
+    N('g_adv', 'advantage', X[3], 260, [P('estimator', 'grpo'), P('num_generations', '4')]),
+    N('g_train', 'train_step', X[4], 0, [P('tokenizer', TOKENIZER), P('template_config', TEMPLATE), P('lr', '1e-4'), P('gradient_accumulation_steps', '1'), P('micro_batch_size', '4')], { then: 'left' }),
     N('g_ckpt', 'checkpoint', X[5], 0, [P('profile', 'model')]),
     N('g_merge', 'merge', X[6], 0, [P('merge_config', '{"adapters": ["output/checkpoint-final"]}')]),
-    N('g_infer', 'infer', X[7], 0, [P('infer_config', '{"sampler": "vllm"}')]),
-    N('g_sync', 'weight_sync', X[3], 520, undefined, { after: 'right', then: 'left' }),
+    /* infer 与 dataset 同处底部空带：data→infer 的长边沿底部走，不穿主链 */
+    N('g_infer', 'infer', X[7], Y[2], [P('infer_config', '{"sampler": "vllm"}')]),
+    N('g_sync', 'weight_sync', X[3], 760, undefined, { after: 'right', then: 'left' }),
     /* 打分函数与训练目标是独立节点：kind 选注册名 */
-    N('g_scor', 'scorer', X[2], 260, [P('kind', 'accuracy')]),
-    N('g_loss', 'loss', X[4], 520, [P('kind', 'grpo')]),
+    N('g_scor', 'scorer', X[2], -280, [P('kind', 'accuracy')]),
+    N('g_loss', 'loss', X[4], 500, [P('kind', 'grpo')]),
     /* 左列资源：采样器与策略模型（各只有一个真实关系：引擎、被训对象） */
     N('g_sampler', 'sampler', 0, Y[0], [P('model', TOKENIZER), P('engine', 'vllm'), P('engine_args', ENGINE_ARGS), P('template_config', TEMPLATE)]),
     N('g_policy', 'model', 0, Y[1], [P('model', TOKENIZER), P('train_type', 'lora')]),
@@ -136,10 +142,12 @@ const GRPO_FULL: Preset = {
     if (n.id === 'g_policy') return { ...n, params: [P('model', TOKENIZER), P('train_type', 'full')] };
     if (n.id === 'g_train') return { ...n, params: [P('tokenizer', TOKENIZER), P('template_config', TEMPLATE), P('lr', '1e-6'), P('gradient_accumulation_steps', '1'), P('micro_batch_size', '4')] };
     if (n.id === 'g_loss') return { ...n, params: [P('kind', 'grpo'), P('loss_kwargs', '{"beta": 0.04}')] };
+    /* 参考模型→参考前向是顶部水平边：scorer 再上移一层，让出 y=-235 走廊 */
+    if (n.id === 'g_scor') return { ...n, y: -560 };
     return n;
   }).concat([
-    N('g_ref', 'model', -262, Y[1], [P('model', TOKENIZER), P('freeze', 'true')]),
-    N('g_refsig', 'model_forward', X[4], 260, [P('tokenizer', TOKENIZER), P('template_config', TEMPLATE), P('outputs', '["logps"]')]),
+    N('g_ref', 'model', -262, -280, [P('model', TOKENIZER), P('freeze', 'true')]),
+    N('g_refsig', 'model_forward', X[3], -280, [P('tokenizer', TOKENIZER), P('template_config', TEMPLATE), P('outputs', '["logps"]')]),
   ]),
   edges: GRPO.edges.concat([
     E('g_ref', 'model', 'g_refsig', 'model'),
@@ -167,16 +175,16 @@ const GRPO_COLOCATE: Preset = {
   desc: 'wf.presetGrpoColocateDesc',
   nodes: [
     N('c_data', 'dataset', X[0], 0, [P('dataset', DATASET)]),
-    N('c_loader', 'dataloader', X[1], 0, [P('batch_size', '4')]),
-    N('c_gen', 'generate', X[2], 0, [P('num_generations', '4'), P('generation_config', GEN_ARGS)]),
-    N('c_score', 'score', X[3], 0),
-    N('c_adv', 'advantage', X[4], 0, [P('estimator', 'grpo'), P('num_generations', '4')]),
-    N('c_train', 'train_step', X[5], 0, [P('tokenizer', TOKENIZER), P('template_config', TEMPLATE), P('lr', '1e-4'), P('gradient_accumulation_steps', '1'), P('micro_batch_size', '4')]),
-    N('c_ckpt', 'checkpoint', X[6], 0, [P('profile', 'model')]),
-    N('c_merge', 'merge', X[7], 0, [P('merge_config', '{"adapters": ["output/checkpoint-final"]}')]),
-    N('c_scor', 'scorer', X[3], 260, [P('kind', 'accuracy')]),
-    N('c_loss', 'loss', X[5], 260, [P('kind', 'grpo')]),
-    N('c_sync', 'weight_sync', X[4], 520, undefined, { after: 'right', then: 'left' }),
+    N('c_loader', 'dataloader', X[0], 160, [P('batch_size', '4')]),
+    N('c_gen', 'generate', X[1], 0, [P('num_generations', '4'), P('generation_config', GEN_ARGS)]),
+    N('c_score', 'score', X[2], 0),
+    N('c_adv', 'advantage', X[3], 260, [P('estimator', 'grpo'), P('num_generations', '4')]),
+    N('c_train', 'train_step', X[4], 0, [P('tokenizer', TOKENIZER), P('template_config', TEMPLATE), P('lr', '1e-4'), P('gradient_accumulation_steps', '1'), P('micro_batch_size', '4')], { then: 'left' }),
+    N('c_ckpt', 'checkpoint', X[5], 0, [P('profile', 'model')]),
+    N('c_merge', 'merge', X[6], 0, [P('merge_config', '{"adapters": ["output/checkpoint-final"]}')]),
+    N('c_scor', 'scorer', X[2], -280, [P('kind', 'accuracy')]),
+    N('c_loss', 'loss', X[4], 500, [P('kind', 'grpo')]),
+    N('c_sync', 'weight_sync', X[5], 760, undefined, { after: 'right', then: 'left' }),
     N('c_sampler', 'sampler', 0, Y[0], [P('model', TOKENIZER), P('engine', 'vllm'), P('engine_args', ENGINE_ARGS), P('template_config', TEMPLATE)]),
     N('c_policy', 'model', 0, Y[1], [P('model', TOKENIZER), P('train_type', 'lora')]),
   ],
@@ -196,6 +204,8 @@ const GRPO_COLOCATE: Preset = {
     E('c_policy', 'model', 'c_sync', 'model'),
     E('c_sampler', 'sampler', 'c_sync', 'targets', 'targets'),
     E('c_train', 'then', 'c_sync', 'after'),
+    /* 回环闭合：同步完成后放行下一批（feedback 边，整圈 commit 后点亮） */
+    E('c_sync', 'then', 'c_loader', 'after'),
   ],
   frames: [{
     id: 'c_loop', label: 'wf.frameTrainLoop', note: 'wf.noteColocateAuto',
@@ -225,24 +235,27 @@ const PPO: Preset = {
     N('p_loader', 'dataloader', X[0], 260, [P('batch_size', '4')]),
     N('p_driver', 'streaming_driver', X[1], 0, [P('tokenizer', TOKENIZER), P('template_config', TEMPLATE), P('rl_config', COMPLETION), P('async_mode', 'none'), P('max_staleness', '0'), P('num_generations', '4')]),
     N('p_score', 'score', X[2], 0),
-    N('p_vsig', 'model_forward', X[3], -260, [P('tokenizer', TOKENIZER), P('template_config', TEMPLATE), P('outputs', '["values"]')]),
-    /* 参考前向：GAE 的 token KL 读 ref_out.logps，与 recipe 的冻结参考同口径 */
-    N('p_refsig', 'model_forward', X[2], -260, [P('tokenizer', TOKENIZER), P('template_config', TEMPLATE), P('outputs', '["logps"]')]),
-    N('p_adv', 'advantage', X[3], 0, [P('estimator', 'gae'), P('num_generations', '4'), P('kwargs', '{"gamma": 1.0, "gae_lambda": 0.95, "normalize": false, "kl_coef": 0.05, "kl_kind": "k1"}')]),
-    N('p_train', 'train_step', X[4], 0, [P('tokenizer', TOKENIZER), P('template_config', TEMPLATE), P('lr', '1e-5'), P('gradient_accumulation_steps', '1'), P('micro_batch_size', '4')]),
-    N('p_vtrain', 'train_step', X[5], -260, [P('tokenizer', TOKENIZER), P('template_config', TEMPLATE), P('lr', '1e-5'), P('gradient_accumulation_steps', '1'), P('micro_batch_size', '4')]),
-    N('p_ckpt', 'checkpoint', X[5], 0, [P('profile', 'model')]),
-    N('p_merge', 'merge', X[6], 0, [P('merge_config', '{"adapters": ["output/checkpoint-final"]}')]),
-    N('p_wavg', 'weight_average', X[4], 780, [P('mode', 'ema'), P('alpha', '0.9')]),
-    N('p_sync', 'weight_sync', X[3], 520, undefined, { after: 'right', then: 'left' }),
-    N('p_scor', 'scorer', X[2], 260, [P('kind', 'accuracy')]),
-    N('p_loss', 'loss', X[4], 260, [P('kind', 'ppo')]),
-    N('p_vloss', 'loss', X[6], -260, [P('kind', 'ppo_value')]),
+    N('p_vsig', 'model_forward', X[2], -280, [P('tokenizer', TOKENIZER), P('template_config', TEMPLATE), P('outputs', '["values"]')]),
+    /* 参考前向：GAE 的 token KL 读 ref_out.logps，与 recipe 的冻结参考同口径。
+     * 放在 advantage 下方：冻结参考在左下，model 边沿底部空带过来不穿资源列 */
+    N('p_refsig', 'model_forward', X[3], 500, [P('tokenizer', TOKENIZER), P('template_config', TEMPLATE), P('outputs', '["logps"]')]),
+    N('p_adv', 'advantage', X[3], 260, [P('estimator', 'gae'), P('num_generations', '4'), P('kwargs', '{"gamma": 1.0, "gae_lambda": 0.95, "normalize": false, "kl_coef": 0.05, "kl_kind": "k1"}')]),
+    N('p_train', 'train_step', X[4], 0, [P('tokenizer', TOKENIZER), P('template_config', TEMPLATE), P('lr', '1e-5'), P('gradient_accumulation_steps', '1'), P('micro_batch_size', '4')], { then: 'left' }),
+    /* critic 训练线在 train 正上方同列叠放：advantage→vtrain 的 batch 边走
+     * 列间空隙，value→vtrain 的 model 边是顶部水平线，都不穿主链卡 */
+    N('p_vtrain', 'train_step', X[4], -620, [P('tokenizer', TOKENIZER), P('template_config', TEMPLATE), P('lr', '1e-5'), P('gradient_accumulation_steps', '1'), P('micro_batch_size', '4')]),
+    N('p_ckpt', 'checkpoint', X[5], -60, [P('profile', 'model')]),
+    N('p_merge', 'merge', X[6], -60, [P('merge_config', '{"adapters": ["output/checkpoint-final"]}')]),
+    N('p_wavg', 'weight_average', X[5], 760, [P('mode', 'ema'), P('alpha', '0.9')]),
+    N('p_sync', 'weight_sync', X[3], 1000, undefined, { after: 'right', then: 'left' }),
+    N('p_scor', 'scorer', X[1], -560, [P('kind', 'accuracy')]),
+    N('p_loss', 'loss', X[4], 500, [P('kind', 'ppo')]),
+    N('p_vloss', 'loss', X[4], -900, [P('kind', 'ppo_value')]),
     N('p_sampler', 'sampler', 0, Y[0], [P('model', TOKENIZER), P('engine', 'vllm'), P('engine_args', ENGINE_ARGS), P('template_config', TEMPLATE)]),
     N('p_policy', 'model', 0, Y[1], [P('model', TOKENIZER), P('train_type', 'lora')]),
     // critic 头：PPO 的 value 前向（task='value'）要求 seq_cls 打分头，与 recipe 侧
-    // critic（seq_cls + num_labels=1）同一构造口径。
-    N('p_value', 'model', 0, Y[2], [P('model', TOKENIZER), P('train_type', 'lora'),
+    // critic（seq_cls + num_labels=1）同一构造口径。放左上：两条 model 边都走顶部空带。
+    N('p_value', 'model', -262, -620, [P('model', TOKENIZER), P('train_type', 'lora'),
       P('model_config', '{"task_type": "seq_cls", "num_labels": 1}')]),
     N('p_ref', 'model', -262, Y[2], [P('model', TOKENIZER), P('freeze', 'true')]),
   ],
@@ -298,16 +311,16 @@ const RFT: Preset = {
   desc: 'wf.presetRftDesc',
   nodes: [
     N('r_data', 'dataset', X[0], 0, [P('dataset', DATASET)]),
-    N('r_loader', 'dataloader', X[1], 0, [P('batch_size', '4')]),
-    N('r_gen', 'generate', X[2], 0, [P('num_generations', '8'), P('generation_config', GEN_ARGS)]),
-    N('r_score', 'score', X[3], 0),
-    N('r_sel', 'select', X[4], 0, [P('select', 'best_of_n'), P('top_k', '1')]),
-    N('r_train', 'train_step', X[5], 0, [P('tokenizer', TOKENIZER), P('template_config', TEMPLATE), P('lr', '1e-4'), P('gradient_accumulation_steps', '1'), P('micro_batch_size', '4')]),
-    N('r_ckpt', 'checkpoint', X[6], 0, [P('profile', 'model')]),
-    N('r_merge', 'merge', X[7], 0, [P('merge_config', '{"adapters": ["output/checkpoint-final"]}')]),
-    N('r_scor', 'scorer', X[3], 260, [P('kind', 'accuracy')]),
-    N('r_loss', 'loss', X[5], 260, [P('kind', 'cross_entropy')]),
-    N('r_sync', 'weight_sync', X[4], 520, undefined, { after: 'right', then: 'left' }),
+    N('r_loader', 'dataloader', X[0], 160, [P('batch_size', '4')]),
+    N('r_gen', 'generate', X[1], 0, [P('num_generations', '8'), P('generation_config', GEN_ARGS)]),
+    N('r_score', 'score', X[2], 0),
+    N('r_sel', 'select', X[3], 260, [P('select', 'best_of_n'), P('top_k', '1')]),
+    N('r_train', 'train_step', X[4], 0, [P('tokenizer', TOKENIZER), P('template_config', TEMPLATE), P('lr', '1e-4'), P('gradient_accumulation_steps', '1'), P('micro_batch_size', '4')], { then: 'left' }),
+    N('r_ckpt', 'checkpoint', X[5], 0, [P('profile', 'model')]),
+    N('r_merge', 'merge', X[6], 0, [P('merge_config', '{"adapters": ["output/checkpoint-final"]}')]),
+    N('r_scor', 'scorer', X[2], -280, [P('kind', 'accuracy')]),
+    N('r_loss', 'loss', X[4], 500, [P('kind', 'cross_entropy')]),
+    N('r_sync', 'weight_sync', X[5], 760, undefined, { after: 'right', then: 'left' }),
     N('r_sampler', 'sampler', 0, Y[0], [P('model', TOKENIZER), P('engine', 'vllm'), P('engine_args', ENGINE_ARGS), P('template_config', TEMPLATE)]),
     N('r_policy', 'model', 0, Y[1], [P('model', TOKENIZER), P('train_type', 'lora')]),
   ],
@@ -329,6 +342,8 @@ const RFT: Preset = {
     E('r_policy', 'model', 'r_sync', 'model'),
     E('r_sampler', 'sampler', 'r_sync', 'targets', 'targets'),
     E('r_train', 'then', 'r_sync', 'after'),
+    /* 回环闭合：同步完成后放行下一批（feedback 边） */
+    E('r_sync', 'then', 'r_loader', 'after'),
   ],
   frames: [{
     id: 'r_loop', label: 'wf.frameTrainLoop', note: 'wf.noteRft',
@@ -349,19 +364,21 @@ const OPD_MT: Preset = {
   desc: 'wf.presetOpdMtDesc',
   nodes: [
     N('o_data', 'dataset', X[0], 0, [P('dataset', DATASET)]),
-    N('o_loader', 'dataloader', X[1], 0, [P('batch_size', '4')]),
-    N('o_gen', 'generate', X[2], 0, [P('num_generations', '4'), P('generation_config', GEN_ARGS)]),
-    N('o_tsig1', 'model_forward', X[3], -260, [P('tokenizer', TOKENIZER), P('template_config', TEMPLATE), P('outputs', '["logps"]')]),
-    N('o_tsig2', 'model_forward', X[4], -260, [P('tokenizer', TOKENIZER), P('template_config', TEMPLATE), P('outputs', '["logps"]')]),
-    N('o_mix', 'signal_combine', X[5], -260, [P('mode', 'probability_mixture')]),
-    N('o_train', 'train_step', X[5], 0, [P('tokenizer', TOKENIZER), P('template_config', TEMPLATE), P('lr', '1e-4'), P('gradient_accumulation_steps', '1'), P('micro_batch_size', '4')]),
-    N('o_ckpt', 'checkpoint', X[6], 0, [P('profile', 'model')]),
-    N('o_merge', 'merge', X[7], 0, [P('merge_config', '{"adapters": ["output/checkpoint-final"]}')]),
-    N('o_loss', 'loss', X[5], 260, [P('kind', 'opsd')]),
+    N('o_loader', 'dataloader', X[0], 260, [P('batch_size', '4')]),
+    N('o_gen', 'generate', X[1], 0, [P('num_generations', '4'), P('generation_config', GEN_ARGS)]),
+    /* 两路教师前向同列上下叠：gen 到两路的 traj 边都是相邻列，不穿卡 */
+    N('o_tsig1', 'model_forward', X[2], -280, [P('tokenizer', TOKENIZER), P('template_config', TEMPLATE), P('outputs', '["logps"]')]),
+    N('o_tsig2', 'model_forward', X[2], -560, [P('tokenizer', TOKENIZER), P('template_config', TEMPLATE), P('outputs', '["logps"]')]),
+    N('o_mix', 'signal_combine', X[3], -280, [P('mode', 'probability_mixture')]),
+    N('o_train', 'train_step', X[4], 0, [P('tokenizer', TOKENIZER), P('template_config', TEMPLATE), P('lr', '1e-4'), P('gradient_accumulation_steps', '1'), P('micro_batch_size', '4')], { then: 'left' }),
+    N('o_ckpt', 'checkpoint', X[5], 0, [P('profile', 'model')]),
+    N('o_merge', 'merge', X[6], 0, [P('merge_config', '{"adapters": ["output/checkpoint-final"]}')]),
+    N('o_loss', 'loss', X[4], 500, [P('kind', 'opsd')]),
     N('o_sampler', 'sampler', 0, Y[0], [P('model', TOKENIZER), P('engine', 'vllm'), P('engine_args', ENGINE_ARGS), P('template_config', TEMPLATE)]),
-    N('o_teach1', 'model', 0, Y[1], [P('model', TOKENIZER), P('freeze', 'true')]),
-    N('o_teach2', 'model', 0, Y[2], [P('model', TOKENIZER), P('freeze', 'true')]),
-    N('o_policy', 'model', 0, Y[3], [P('model', TOKENIZER), P('train_type', 'lora')]),
+    /* 冻结教师放左上：model 边沿顶部空带水平进前向卡，不穿主链 */
+    N('o_teach1', 'model', -262, -280, [P('model', TOKENIZER), P('freeze', 'true')]),
+    N('o_teach2', 'model', -262, -620, [P('model', TOKENIZER), P('freeze', 'true')]),
+    N('o_policy', 'model', 0, Y[1], [P('model', TOKENIZER), P('train_type', 'lora')]),
   ],
   edges: [
     E('o_data', 'data', 'o_loader', 'data'),
@@ -380,6 +397,8 @@ const OPD_MT: Preset = {
     E('o_train', 'step', 'o_ckpt', 'step'),
     E('o_train', 'model', 'o_ckpt', 'model'),
     E('o_ckpt', 'artifact', 'o_merge', 'artifact'),
+    /* 回环闭合：每批训完放行下一批（feedback 边；OPSD 派生时随 edges 继承） */
+    E('o_train', 'then', 'o_loader', 'after'),
   ],
   frames: [{
     id: 'o_loop', label: 'wf.frameTrainLoop', note: 'wf.noteOpdMt',
@@ -418,11 +437,11 @@ const SFT: Preset = {
   desc: 'wf.presetSftDesc',
   nodes: [
     N('s_data', 'dataset', X[0], 0, [P('dataset', '["AI-ModelScope/alpaca-gpt4-data-en"]')]),
-    N('s_loader', 'dataloader', X[1], 0, [P('batch_size', '8'), P('source', 'rows')]),
-    N('s_train', 'train_step', X[2], 0, [P('tokenizer', TOKENIZER), P('template_config', TEMPLATE), P('lr', '1e-4'), P('gradient_accumulation_steps', '1'), P('micro_batch_size', '4')]),
-    N('s_loss', 'loss', X[2], 260, [P('kind', 'cross_entropy')]),
-    N('s_ckpt', 'checkpoint', X[3], 0, [P('profile', 'model')]),
-    N('s_merge', 'merge', X[4], 0, [P('merge_config', '{"adapters": ["output/checkpoint-final"]}')]),
+    N('s_loader', 'dataloader', X[0], 260, [P('batch_size', '8'), P('source', 'rows')]),
+    N('s_train', 'train_step', X[1], 0, [P('tokenizer', TOKENIZER), P('template_config', TEMPLATE), P('lr', '1e-4'), P('gradient_accumulation_steps', '1'), P('micro_batch_size', '4')], { then: 'left' }),
+    N('s_loss', 'loss', X[1], 500, [P('kind', 'cross_entropy')]),
+    N('s_ckpt', 'checkpoint', X[2], 0, [P('profile', 'model')]),
+    N('s_merge', 'merge', X[3], 0, [P('merge_config', '{"adapters": ["output/checkpoint-final"]}')]),
     N('s_policy', 'model', 0, Y[0], [P('model', TOKENIZER), P('train_type', 'lora')]),
   ],
   edges: [
@@ -432,6 +451,8 @@ const SFT: Preset = {
     E('s_policy', 'model', 's_train', 'model'),
     E('s_train', 'step', 's_ckpt', 'step'),
     E('s_ckpt', 'artifact', 's_merge', 'artifact'),
+    /* 回环闭合：每批训完放行下一批（feedback 边，then 翻左侧走列间空隙） */
+    E('s_train', 'then', 's_loader', 'after'),
   ],
   frames: [{
     id: 's_loop', label: 'wf.frameTrainLoop', note: 'wf.noteOfflineAuto',
@@ -466,14 +487,14 @@ const DPO: Preset = {
   desc: 'wf.presetDpoDesc',
   nodes: [
     N('d_data', 'dataset', X[0], 0, [P('dataset', '["AI-ModelScope/orpo-dpo-mix-40k"]')]),
-    N('d_loader', 'dataloader', X[1], 0, [P('batch_size', '4'), P('source', 'rows')]),
-    N('d_rsig', 'model_forward', X[2], -260, [P('tokenizer', TOKENIZER), P('template_config', TEMPLATE), P('outputs', '["logps"]')]),
-    N('d_train', 'train_step', X[2], 0, [P('tokenizer', TOKENIZER), P('template_config', TEMPLATE), P('lr', '5e-6'), P('gradient_accumulation_steps', '1'), P('micro_batch_size', '4')]),
-    N('d_loss', 'loss', X[2], 260, [P('kind', 'dpo')]),
-    N('d_ckpt', 'checkpoint', X[3], 0, [P('profile', 'model')]),
-    N('d_merge', 'merge', X[4], 0, [P('merge_config', '{"adapters": ["output/checkpoint-final"]}')]),
+    N('d_loader', 'dataloader', X[0], 260, [P('batch_size', '4'), P('source', 'rows')]),
+    N('d_rsig', 'model_forward', X[1], -280, [P('tokenizer', TOKENIZER), P('template_config', TEMPLATE), P('outputs', '["logps"]')]),
+    N('d_train', 'train_step', X[1], 0, [P('tokenizer', TOKENIZER), P('template_config', TEMPLATE), P('lr', '5e-6'), P('gradient_accumulation_steps', '1'), P('micro_batch_size', '4')], { then: 'left' }),
+    N('d_loss', 'loss', X[1], 500, [P('kind', 'dpo')]),
+    N('d_ckpt', 'checkpoint', X[2], 0, [P('profile', 'model')]),
+    N('d_merge', 'merge', X[3], 0, [P('merge_config', '{"adapters": ["output/checkpoint-final"]}')]),
     N('d_policy', 'model', 0, Y[0], [P('model', TOKENIZER), P('train_type', 'lora')]),
-    N('d_ref', 'model', 0, Y[1], [P('model', TOKENIZER), P('freeze', 'true')]),
+    N('d_ref', 'model', 0, 860, [P('model', TOKENIZER), P('freeze', 'true')]),
   ],
   edges: [
     E('d_data', 'data', 'd_loader', 'data'),
@@ -486,6 +507,8 @@ const DPO: Preset = {
     E('d_train', 'step', 'd_ckpt', 'step'),
     E('d_train', 'model', 'd_ckpt', 'model'),
     E('d_ckpt', 'artifact', 'd_merge', 'artifact'),
+    /* 回环闭合：每批训完放行下一批（feedback 边） */
+    E('d_train', 'then', 'd_loader', 'after'),
   ],
   frames: [{
     id: 'd_loop', label: 'wf.frameTrainLoop', note: 'wf.noteDpo',
@@ -510,19 +533,19 @@ const TCPO: Preset = {
     // 通过/失败混合（组内奖励有差异，组准入不丢）；max_empty_rounds 让
     // 空产出快速失败而不是无限搜索；max_turns 透传给内部 MultiTurnRollout。
     N('t_chal', 'challenger', X[1], 0, [P('seed', '数学谜题'), P('max_tasks', '4'), P('tokenizer', TOKENIZER), P('template_config', TEMPLATE),
-                                        P('challenger_config', '{"num_challenger_rollouts": 2, "num_solver_rollouts": 3, "pass_band": [1, 2], "max_empty_rounds": 12, "max_turns": 8}')]),
+                                        P('challenger_config', '{"num_challenger_rollouts": 2, "num_solver_rollouts": 3, "pass_band": [1, 2], "max_empty_rounds": 12, "max_turns": 8}')], { after: 'right' }),
     N('t_score', 'score', X[2], 0),
-    N('t_adv', 'advantage', X[3], 0, [P('estimator', 'grpo'), P('num_generations', '3')]),
-    N('t_train', 'train_step', X[4], 0, [P('tokenizer', TOKENIZER), P('template_config', TEMPLATE), P('lr', '1e-4'), P('gradient_accumulation_steps', '1'), P('micro_batch_size', '4')]),
+    N('t_adv', 'advantage', X[3], 260, [P('estimator', 'grpo'), P('num_generations', '3')]),
+    N('t_train', 'train_step', X[4], 0, [P('tokenizer', TOKENIZER), P('template_config', TEMPLATE), P('lr', '1e-4'), P('gradient_accumulation_steps', '1'), P('micro_batch_size', '4')], { then: 'left' }),
     N('t_ckpt', 'checkpoint', X[5], 0, [P('profile', 'model')]),
-    N('t_sync', 'weight_sync', X[3], 520, undefined, { after: 'right', then: 'left' }),
-    N('t_scor', 'scorer', X[2], 260, [P('kind', 'accuracy')]),
-    N('t_loss', 'loss', X[4], 260, [P('kind', 'grpo')]),
+    N('t_sync', 'weight_sync', X[3], 760, undefined, { after: 'right', then: 'left' }),
+    N('t_scor', 'scorer', X[2], -280, [P('kind', 'accuracy')]),
+    N('t_loss', 'loss', X[4], 500, [P('kind', 'grpo')]),
     N('t_sampler', 'sampler', 0, Y[0], [P('model', TOKENIZER), P('engine', 'vllm'), P('engine_args', ENGINE_ARGS_AGENTIC), P('template_config', TEMPLATE)]),
     N('t_policy', 'model', 0, Y[1], [P('model', TOKENIZER), P('train_type', 'lora')]),
     // 相对 workspace 落在会话目录下（sandbox_config 的 LocalEnv 原生字段）：
     // 持久工作区启用文件工具，出题 episode 才有可被 check 脚本读回的产出。
-    N('t_env', 'sandbox_env', X[1], 260, [P('sandbox_config', '{"workspace": "workspace"}')]),
+    N('t_env', 'sandbox_env', X[1], 940, [P('sandbox_config', '{"workspace": "workspace"}')]),
   ],
   edges: [
     E('t_api', 'endpoint', 't_chal', 'api'),
@@ -560,24 +583,24 @@ const PSC: Preset = {
   label: 'wf.presetPsc',
   desc: 'wf.presetPscDesc',
   nodes: [
-    N('s_api', 'api_endpoint', 0, 0, [P('base_url', 'https://api.modelscope.cn/v1'), P('model', 'deepseek-ai/DeepSeek-V3.1')]),
+    N('s_api', 'api_endpoint', 0, -280, [P('base_url', 'https://api.modelscope.cn/v1'), P('model', 'deepseek-ai/DeepSeek-V3.1')]),
     // 出题/解题批形与 tcpo 同构（challenger_config 原生构造参数）；questions
     // 口是出题组（2 条/组），rloo 的 num_generations 与组宽对齐。
     N('s_chal', 'challenger', X[1], 0, [P('seed', '谜题生成'), P('max_tasks', '4'), P('tokenizer', TOKENIZER), P('template_config', TEMPLATE),
-                                         P('challenger_config', '{"num_challenger_rollouts": 2, "num_solver_rollouts": 3, "pass_band": [1, 2], "max_empty_rounds": 12, "max_turns": 8}')]),
+                                         P('challenger_config', '{"num_challenger_rollouts": 2, "num_solver_rollouts": 3, "pass_band": [1, 2], "max_empty_rounds": 12, "max_turns": 8}')], { after: 'right' }),
     N('s_score', 'score', X[2], 0),
-    N('s_adv', 'advantage', X[3], 0, [P('estimator', 'rloo'), P('num_generations', '2')]),
-    N('s_train', 'train_step', X[4], 0, [P('tokenizer', TOKENIZER), P('template_config', TEMPLATE), P('lr', '1e-4'), P('gradient_accumulation_steps', '1'), P('micro_batch_size', '4')]),
+    N('s_adv', 'advantage', X[3], 260, [P('estimator', 'rloo'), P('num_generations', '2')]),
+    N('s_train', 'train_step', X[4], 0, [P('tokenizer', TOKENIZER), P('template_config', TEMPLATE), P('lr', '1e-4'), P('gradient_accumulation_steps', '1'), P('micro_batch_size', '4')], { then: 'left' }),
     N('s_ckpt', 'checkpoint', X[5], 0, [P('profile', 'model')]),
-    N('s_sync', 'weight_sync', X[3], 780, undefined, { after: 'right', then: 'left' }),
-    N('s_scor', 'scorer', X[2], 260, [P('kind', 'accuracy')]),
-    N('s_loss', 'loss', X[4], 260, [P('kind', 'grpo')]),
+    N('s_sync', 'weight_sync', X[3], 760, undefined, { after: 'right', then: 'left' }),
+    N('s_scor', 'scorer', X[2], -280, [P('kind', 'accuracy')]),
+    N('s_loss', 'loss', X[4], 500, [P('kind', 'grpo')]),
     N('s_sampler', 'sampler', -262, Y[0], [P('model', TOKENIZER), P('engine', 'vllm'), P('engine_args', ENGINE_ARGS_AGENTIC), P('template_config', TEMPLATE)]),
-    N('s_sam2', 'sampler', -262, Y[1], [P('model', TOKENIZER), P('engine', 'vllm'), P('engine_args', ENGINE_ARGS_AGENTIC), P('template_config', TEMPLATE)]),
-    N('s_prop', 'model', 0, Y[0], [P('model', TOKENIZER), P('train_type', 'lora')]),
+    N('s_sam2', 'sampler', -262, -560, [P('model', TOKENIZER), P('engine', 'vllm'), P('engine_args', ENGINE_ARGS_AGENTIC), P('template_config', TEMPLATE)]),
+    N('s_prop', 'model', 0, 940, [P('model', TOKENIZER), P('train_type', 'lora')]),
     // 相对 workspace 落在会话目录下（sandbox_config 的 LocalEnv 原生字段）。
-    N('s_env', 'sandbox_env', X[1], 520, [P('sandbox_config', '{"workspace": "workspace"}')]),
-    N('s_sroll', 'rollout', X[1], 260, [P('tokenizer', TOKENIZER), P('template_config', TEMPLATE), P('max_turns', '4')]),
+    N('s_env', 'sandbox_env', X[1], Y[0], [P('sandbox_config', '{"workspace": "workspace"}')]),
+    N('s_sroll', 'rollout', X[1], -560, [P('tokenizer', TOKENIZER), P('template_config', TEMPLATE), P('max_turns', '4')]),
   ],
   edges: [
     E('s_api', 'endpoint', 's_chal', 'api'),
@@ -617,23 +640,23 @@ const RSI: Preset = {
   label: 'wf.presetRsi',
   desc: 'wf.presetRsiDesc',
   nodes: [
-    N('i_data', 'dataset', X[0], 260, [P('dataset', DATASET)]),
-    N('i_loader', 'dataloader', X[1], 260, [P('batch_size', '4')]),
-    N('i_gen', 'generate', X[2], 260, [P('num_generations', '4'), P('generation_config', GEN_ARGS)]),
-    N('i_score', 'score', X[3], 260),
-    N('i_adv', 'advantage', X[4], 260, [P('estimator', 'grpo'), P('num_generations', '4')]),
-    N('i_train', 'train_step', X[5], 260, [P('tokenizer', TOKENIZER), P('template_config', TEMPLATE), P('lr', '1e-4'), P('gradient_accumulation_steps', '1'), P('micro_batch_size', '4')]),
-    N('i_ckpt', 'checkpoint', X[6], 260, [P('profile', 'model')]),
-    N('i_scor', 'scorer', X[3], 520, [P('kind', 'accuracy')]),
-    N('i_loss', 'loss', X[5], 520, [P('kind', 'grpo')]),
-    N('i_sync', 'weight_sync', X[4], 780, undefined, { after: 'right', then: 'left' }),
+    N('i_data', 'dataset', X[0], 0, [P('dataset', DATASET)]),
+    N('i_loader', 'dataloader', X[0], 160, [P('batch_size', '4')]),
+    N('i_gen', 'generate', X[1], 0, [P('num_generations', '4'), P('generation_config', GEN_ARGS)]),
+    N('i_score', 'score', X[2], 0),
+    N('i_adv', 'advantage', X[3], 260, [P('estimator', 'grpo'), P('num_generations', '4')]),
+    N('i_train', 'train_step', X[4], 0, [P('tokenizer', TOKENIZER), P('template_config', TEMPLATE), P('lr', '1e-4'), P('gradient_accumulation_steps', '1'), P('micro_batch_size', '4')], { then: 'left' }),
+    N('i_ckpt', 'checkpoint', X[5], 0, [P('profile', 'model')]),
+    N('i_scor', 'scorer', X[1], -840, [P('kind', 'accuracy')]),
+    N('i_loss', 'loss', X[4], 500, [P('kind', 'grpo')]),
+    N('i_sync', 'weight_sync', X[5], 760, undefined, { after: 'right', then: 'left' }),
     N('i_sampler', 'sampler', 0, Y[0], [P('model', TOKENIZER), P('engine', 'vllm'), P('engine_args', ENGINE_ARGS), P('template_config', TEMPLATE)]),
     N('i_policy', 'model', 0, Y[1], [P('model', TOKENIZER), P('train_type', 'lora')]),
     // 空工具集：仓内没有随包发布的工具插件模块（toolset 的 plugins 收插件
     // 文件/目录路径）；用户把自己的工具模块路径填进来即得真实工具环。
-    N('i_tool', 'toolset', X[2], 0, [P('plugins', '[]')]),
-    N('i_env', 'sandbox_env', X[3], 0),
-    N('i_roll', 'rollout', X[4], 0, [P('tokenizer', TOKENIZER), P('template_config', TEMPLATE), P('max_turns', '6')]),
+    N('i_tool', 'toolset', X[1], -280, [P('plugins', '[]')]),
+    N('i_env', 'sandbox_env', X[1], -560),
+    N('i_roll', 'rollout', X[3], -480, [P('tokenizer', TOKENIZER), P('template_config', TEMPLATE), P('max_turns', '6')]),
   ],
   edges: [
     E('i_data', 'data', 'i_loader', 'data'),
@@ -653,6 +676,8 @@ const RSI: Preset = {
     E('i_policy', 'model', 'i_sync', 'model'),
     E('i_sampler', 'sampler', 'i_sync', 'targets', 'targets'),
     E('i_train', 'then', 'i_sync', 'after'),
+    /* 回环闭合：同步完成后放行下一批（feedback 边） */
+    E('i_sync', 'then', 'i_loader', 'after'),
   ],
   frames: [{
     id: 'i_loop', label: 'wf.frameEpisodeLoop', note: 'wf.noteRsi',
