@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { toast } from 'sonner';
-import { Bot, ChevronDown, ChevronLeft, Code, FileText, Play, PowerOff, Save, Settings2, Square, Terminal, TriangleAlert, Workflow } from 'lucide-react';
+import { Bot, ChevronDown, ChevronLeft, Code, FileText, Pause, Play, PowerOff, Save, Settings2, Square, Terminal, TriangleAlert, Workflow } from 'lucide-react';
 import { NodeCanvas } from './NodeCanvas';
 import { NodePalette } from './NodePalette';
 import { NodeInspector } from './NodeInspector';
@@ -9,18 +9,18 @@ import type { InspectorTab } from './NodeInspector';
 import { FlowAssistant } from './FlowAssistant';
 import type { RunState } from './FlowAssistant';
 import type { AiAction } from './aiAssist';
-import { NODE_TYPES, NODE_W, findPort, findPortOf, nodeDefOf, nodeLabel } from './nodeTypes';
+import { NODE_TYPES, NODE_W, findPort, findPortOf, nodeDefOf, nodeLabel, paramsOf } from './nodeTypes';
 import type { TFn } from './nodeTypes';
 import type { GraphEdge, GraphFrame, GraphNode } from './nodeTypes';
 import { useT } from '@/i18n';
 import { DEFAULT_PRESET, PRESETS, clonePreset } from './presets';
-import { getWorkflowLog, getWorkflowSession, getWorkflowSessionByKey, pauseWorkflowRun, releaseWorkflowSession, resumeWorkflowRun, startWorkflowRun, stopWorkflowRun } from '../../api/workflow';
+import { getWorkflowLog, getWorkflowSession, getWorkflowSessionByKey, pauseWorkflowRun, prewarmWorkflowSession, releaseWorkflowSession, resumeWorkflowRun, startWorkflowRun, stopWorkflowRun } from '../../api/workflow';
 import type { WorkflowEvent, WorkflowResourceDecl, WorkflowRunSubmission, WorkflowSessionSnapshot } from '../../api/workflow';
 import { createFlow, getFlow, saveFlow } from '../../api/flows';
 import type { FlowGraph } from '../../api/flows';
 import { upgradeWorkflowGraph } from '../../api/workflow';
 import type { WorkflowNodeDecl, WorkflowUpgradePreview } from '../../api/workflow';
-import { listModels, type ModelConfig } from '../../api/models';
+import { listModels, listMsModels, type ModelConfig } from '../../api/models';
 
 import { CodeBlock } from '@/components/CodeBlock';
 import { LogViewer } from '@/components/LogViewer';
@@ -70,6 +70,25 @@ function upstream(edges: GraphEdge[], nameOf: Map<string, string>, id: string): 
     .filter((e) => e.to === id)
     .map((e) => nameOf.get(e.from))
     .filter((n): n is string => !!n);
+}
+
+/**
+ * 一条边落图的纯语义：一个输入口只接一条线，重连即替换；many 口除外
+ * （多路即多槽，slot 是消费端参数名，先以源节点 id 落名，检查面板里可改，
+ * 与后端显式升级器的 name_slot 同语义）。手拉连线与 AI 提议共用；节点表
+ * 由调用方给——AI 落新节点时表里已含它，many 判定才看得见新节点的口。
+ */
+function appendEdge(
+  es: GraphEdge[], allNodes: GraphNode[],
+  from: string, fromPort: string, to: string, toPort: string, id: string,
+): GraphEdge[] {
+  const many = findPortOf(allNodes.find((n) => n.id === to), toPort, 'in')?.many ?? false;
+  const kept = many ? es : es.filter((e) => !(e.to === to && e.toPort === toPort));
+  if (es.some((e) => e.from === from && e.fromPort === fromPort && e.to === to && e.toPort === toPort)) {
+    return es;
+  }
+  const slot = many ? from : undefined;
+  return [...kept, { id, from, fromPort, to, toPort, ...(slot ? { slot } : {}) }];
 }
 
 /*
@@ -157,7 +176,7 @@ function graphToYaml(
     lines.push(`    run: ${n.type}`);
     if (needs.length) lines.push(`    needs: [${needs.join(', ')}]`);
     if (def.lockedPorts) lines.push('    locked: true  # 连线不允许改，只能改参数');
-    (n.params ?? def.params).forEach((p) => lines.push(`    ${p.label}: ${p.value}`));
+    paramsOf(n).forEach((p) => lines.push(`    ${p.label}: ${p.value}`));
     /* 代码节点：把片段原样带上，否则它就只剩一个类型名 */
     const code = n.code ?? def.code;
     if (code) {
@@ -208,7 +227,7 @@ const VIEWS = [
  */
 export function WorkflowEditorPage() {
   const mod = MODULES.workflow;
-  const { settings } = useSettings();
+  const { settings, update } = useSettings();
   const { t } = useT();
   const navigate = useNavigate();
   /** 路由上的实验 id（/workflow/:id/edit）。/workflow/new 没有它：脚手架即初始画布，保存时才落第一条记录 */
@@ -220,6 +239,9 @@ export function WorkflowEditorPage() {
   const [flowName, setFlowName] = useState('');
   /* 刚在本实例里创建的实验：路由跳过来时不用再从持久层回读一遍自己刚写的图 */
   const createdLocally = useRef(false);
+  /** 已保存实验的加载是否完成：完成前自动保存不写盘——GpuPicker 挂载即自动
+   * 勾第一张空闲卡，若先于 getFlow 回填触发写盘，会把用户上次的选卡盖掉 */
+  const flowLoaded = useRef(false);
   const [selected, setSelected] = useState<string | null>(null);
   const [codeDirty, setCodeDirty] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
@@ -230,22 +252,46 @@ export function WorkflowEditorPage() {
   /*
    * 拖拽页 AI 会话（整图抽屉与节点面板共用）：模型列表 mount 拉一次，列由
    * 用户选；会话锚点按 flow 实验固定（wf-<flowId>）——重开画布续上历史图
-   * 对话，turns 按会话×模型分桶。未保存实验（无 flowId）首发建临时会话。
+   * 对话，助手会话单流（历史与模型无关，固定 '*' 桶）。未保存实验（无
+   * flowId）首发建临时会话。
    */
   const [modelConfigs, setModelConfigs] = useState<ModelConfig[]>([]);
   const [aiModel, setAiModel] = useState('');
+  /* 与对话页同源：配了 MS 令牌时官方默认模型前置进清单，发送随回合带 token
+   * 鉴权（它们不在 models.json，服务端凭 x-swift-api-key 头查默认清单） */
+  const msToken = settings.msToken;
+  const [msModelIds, setMsModelIds] = useState<Set<string>>(new Set());
   useEffect(() => {
-    listModels()
-      .then((configs) => {
-        setModelConfigs(configs);
-        setAiModel((prev) => prev || configs[0]?.id || '');
-      })
-      .catch(() => {
+    void (async () => {
+      try {
+        const [configs, ms] = await Promise.all([
+          listModels(),
+          msToken ? listMsModels().catch(() => null) : Promise.resolve(null),
+        ]);
+        const msConfigs: ModelConfig[] = (ms?.models ?? []).map((m) => ({
+          id: m.model,
+          baseUrl: 'https://api-inference.modelscope.cn/v1',
+          model: m.model,
+        }));
+        setMsModelIds(new Set(msConfigs.map((c) => c.id)));
+        const merged = [...msConfigs, ...configs];
+        setModelConfigs(merged);
+        setAiModel((prev) => prev || ms?.default || merged[0]?.id || '');
+      } catch {
         /* 模型清单不可达：AI 面板显示无可用模型，发送回落离线剧本 */
-      });
-  }, []);
+      }
+    })();
+  }, [msToken]);
+  /* 模型选择全局记忆：settings 加载完成后恢复上次选择（仍在清单里才认）；
+   * 本页切换经 onModelChange 写回 settings，各页助手共用同一份记忆 */
+  useEffect(() => {
+    if (settings.aiModel && modelConfigs.some((c) => c.id === settings.aiModel)) {
+      setAiModel(settings.aiModel);
+    }
+  }, [settings.aiModel, modelConfigs]);
   const aiBaseConv = flowId ? `wf-${flowId}` : '';
   const aiModelOptions = modelConfigs.map((m) => ({ value: m.id, label: m.id }));
+  const aiApiKey = msModelIds.has(aiModel) ? msToken : undefined;
   const [runState, setRunState] = useState<RunState>('idle');
   /**
    * 当前常驻会话 id（vite 会话表的键）。run 结束后仍保留：输出页的 preview
@@ -264,6 +310,9 @@ export function WorkflowEditorPage() {
   const [logLines, setLogLines] = useState<string[]>([]);
   const [logOpen, setLogOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  /** 提交等待中的目标节点（'' = 整图）：会话冷启动期间 HTTP 还没回，节点灯
+   * 由轮询驱动还没开始——先给被点的节点转圈与日志占位行，不让它看起来没点上 */
+  const [submitTarget, setSubmitTarget] = useState<string | null>(null);
   const submittingRef = useRef(false);
   const activeRun = useRef<WorkflowRunSubmission | null>(null);
   const [activeEdges, setActiveEdges] = useState<string[] | null>(null);
@@ -287,9 +336,13 @@ export function WorkflowEditorPage() {
    */
   useEffect(() => {
     if (!flowId || createdLocally.current) {
+      /* 本实例刚创建的实验：图已在 state 里（刚写过盘），无需回读，
+       * 自动保存直接放行 */
+      if (flowId) flowLoaded.current = true;
       createdLocally.current = false;
       return;
     }
+    flowLoaded.current = false;
     let cancelled = false;
     void (async () => {
       try {
@@ -324,9 +377,26 @@ export function WorkflowEditorPage() {
           edges: Array.isArray(flow.graph.edges) ? (flow.graph.edges as GraphEdge[]) : [],
           frames: Array.isArray(flow.graph.frames) ? (flow.graph.frames as GraphFrame[]) : [],
         }));
+        reseedSeq(
+          Array.isArray(flow.graph.nodes) ? (flow.graph.nodes as GraphNode[]) : [],
+          Array.isArray(flow.graph.edges) ? (flow.graph.edges as GraphEdge[]) : [],
+          Array.isArray(flow.graph.frames) ? (flow.graph.frames as GraphFrame[]) : [],
+        );
         const p = PRESETS.find((x) => x.key === flow.preset);
         if (p) setPreset(p);
         setFitSignal((s) => s + 1);
+        flowLoaded.current = true;
+        /* 资源页按落盘声明回填：选卡随实验持久化，重启/未运行过也不丢。
+         * 记下来源，会话快照回填不再覆盖它（快照是上次运行的旧声明）。 */
+        const res = flow.graph.resource;
+        if (res?.mode === 'cluster') {
+          setGpuSel({ mode: 'cluster', cards: [], count: res.cluster_gpus });
+          setClusterAddress(res.cluster_address ?? '');
+          resourceFromGraph.current = true;
+        } else if (res?.mode === 'local' && Array.isArray(res.cards)) {
+          setGpuSel({ mode: 'local', cards: res.cards, count: undefined });
+          resourceFromGraph.current = true;
+        }
         /* 画布就位后接管会话：setNodes 的恢复要落到加载后的节点上 */
         restoreSession(flowId);
       } catch (error) {
@@ -348,6 +418,18 @@ export function WorkflowEditorPage() {
   /** 变一下就让画布重新 fit，切示例时用 */
   const [fitSignal, setFitSignal] = useState(0);
   const seq = useRef(100);
+  /* 整图替换（加载已存实验/升级副本/切脚手架）后把 id 计数器续接到图内
+   * 最大数字后缀之后：seq 硬编码 100 起步，存量图里已有 n100 时重开画布
+   * 再加节点会撞出重复 id（实测：新 model_forward 与旧 n100 同名，画布上
+   * 看似同一个节点，新边也绑到歧义 id 上）。n/e/f 三类 id 共用一个计数器。 */
+  const reseedSeq = (ns: GraphNode[], es: GraphEdge[], fs: GraphFrame[]) => {
+    let max = 99;
+    for (const id of [...ns.map((n) => n.id), ...es.map((e) => e.id), ...fs.map((f) => f.id)]) {
+      const m = /^[a-z](\d+)$/.exec(id);
+      if (m) max = Math.max(max, Number(m[1]));
+    }
+    seq.current = max + 1;
+  };
   /** 画布往里写当前视口中心，点组件面板新增的节点就落在眼前 */
   const viewCenter = useRef({ x: 380, y: 260 });
 
@@ -366,9 +448,50 @@ export function WorkflowEditorPage() {
   );
   const code = useMemo(() => graphToCode(nodes, edges, displayName), [nodes, edges, displayName]);
 
-  /** 画布三件套的持久化形态（frames 为空时不带键；version 写画布真实版本——
+  /** 悬浮全局配置：资源页（本机选卡 / 集群地址+卡数），进声明的 resource 段 */
+  const [gpuSel, setGpuSel] = useState<GpuSelection>(EMPTY_GPU_SELECTION);
+  const [clusterAddress, setClusterAddress] = useState('');
+  /** 资源声明已从落盘图回填：会话快照的旧声明不再覆盖（见加载 effect） */
+  const resourceFromGraph = useRef(false);
+
+  /** 资源页声明的唯一转换口径：运行提交（serializeGraph）与保存（graphOut）共用 */
+  const resourceDecl = (): WorkflowResourceDecl => gpuSel.mode === 'cluster'
+    ? { mode: 'cluster', cluster_address: clusterAddress.trim(), cluster_gpus: gpuSel.count ?? 1 }
+    : { mode: 'local', cards: gpuSel.cards };
+
+  /** 画布三件套 + 资源声明的持久化形态（frames 为空时不带键；version 写画布真实版本——
    * 未升级的旧图存回去仍是旧版本，重读时升级流会再次接管，而不是被盖成 v5） */
-  const graphOut = (): FlowGraph => ({ version: graph.version ?? 5, nodes, edges, ...(frames.length ? { frames } : {}) });
+  const graphOut = (): FlowGraph => ({
+    version: graph.version ?? 5,
+    /* 运行灯是运行态不是图结构：持久层一律剥成 idle，刷新/重启不残留旧灯 */
+    nodes: nodes.map((n) => ({ ...n, status: 'idle' as const })),
+    edges,
+    ...(frames.length ? { frames } : {}),
+    /* 选卡/集群声明随实验落盘：重进编辑页回填，不依赖会话还活着 */
+    resource: resourceDecl(),
+  });
+
+  /*
+   * 自动保存：画布结构改动后防抖 1 秒写回持久层（仅已保存实验；/workflow/new
+   * 保持「保存时才落第一条记录」语义）。结构指纹剥掉运行灯——灯亮灯灭不触
+   * 发写盘；升级提议待决时画布是原图占位，不写回。手动「保存」与运行前
+   * 保存仍走各自即时路径，这里只兼底「改了忘存刷新即丢」。
+   */
+  const structuralKey = useMemo(
+    () => JSON.stringify({ nodes: nodes.map(({ status, ...rest }) => rest), edges, frames, resource: resourceDecl() }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [nodes, edges, frames, gpuSel, clusterAddress],
+  );
+  useEffect(() => {
+    if (!flowId || upgradeOffer || !flowLoaded.current) return;
+    const name = flowName.trim();
+    const handle = window.setTimeout(() => {
+      saveFlow(flowId, { ...(name ? { name } : {}), graph: graphOut() })
+        .catch((error) => toast.error(String(error)));
+    }, 1000);
+    return () => window.clearTimeout(handle);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [structuralKey, flowName, flowId, upgradeOffer, gpuSel, clusterAddress]);
 
   /*
    * 保存实验：画布形态连同名称写回 flows 持久层。带 :id 的路由直接覆盖；
@@ -394,19 +517,23 @@ export function WorkflowEditorPage() {
 
   /*
    * 应用升级副本：确认后才替换编辑态。坐标/帧几何是纯展示，旧节点保原位；
-   * 待确认项未清零时副本里仍有未知类型节点，画布按兑底卡片渲染，运行
+   * 待确认项未清零时副本里仍有未知类型节点，画布按兜底卡片渲染，运行
    * 由会话侧的声明校验把住——用户手动处置后重新保存。替换不自动落盘：
    * 保存仍由用户显式触发。
    */
   const acceptUpgrade = () => {
     if (!upgradeOffer) return;
+    const upNodes = canvasNodesFromDeclaration(upgradeOffer.candidate.nodes, graph.nodes);
+    const upEdges = canvasEdgesFromDeclaration(upgradeOffer.candidate.edges);
+    const upFrames = canvasFramesFromDeclaration(upgradeOffer.candidate.frames, graph.frames ?? []);
     setGraph((g) => ({
       ...g,
       version: upgradeOffer.candidate.version,
-      nodes: canvasNodesFromDeclaration(upgradeOffer.candidate.nodes, g.nodes),
-      edges: canvasEdgesFromDeclaration(upgradeOffer.candidate.edges),
-      frames: canvasFramesFromDeclaration(upgradeOffer.candidate.frames, g.frames ?? []),
+      nodes: upNodes,
+      edges: upEdges,
+      frames: upFrames,
     }));
+    reseedSeq(upNodes, upEdges, upFrames);
     setUpgradeOffer(null);
     setUpgradeOpen(false);
     setFitSignal((s) => s + 1);
@@ -426,7 +553,9 @@ export function WorkflowEditorPage() {
     setUsedEdges([]);
     openOnDone.current = null;
     setPreset(p);
-    setGraph(clonePreset(p));
+    const fresh = clonePreset(p);
+    setGraph(fresh);
+    reseedSeq(fresh.nodes, fresh.edges, fresh.frames ?? []);
     setSelected(null);
     setInspectorOpen(false);
     setRunState('idle');
@@ -504,21 +633,7 @@ export function WorkflowEditorPage() {
 
   const connect = (from: string, fromPort: string, to: string, toPort: string) =>
     guard(() => {
-      setEdges((es) => {
-        /** 一个输入口只接一条线，重连时替换旧的；many 口除外（多路即多槽） */
-        const many = findPortOf(nodes.find((n) => n.id === to), toPort, 'in')?.many ?? false;
-        const kept = many ? es : es.filter((e) => !(e.to === to && e.toPort === toPort));
-        if (es.some((e) => e.from === from && e.fromPort === fromPort && e.to === to && e.toPort === toPort)) {
-          return es;
-        }
-        /*
-         * many 口的边必须带 slot：slot 是消费端参数名（train_step.arguments 的
-         * loss 实参、signal_combine.signals 的具名输入）。手连的边先以源节点 id
-         * 落名（与后端显式升级器的 name_slot 同语义），检查面板里可改。
-         */
-        const slot = many ? from : undefined;
-        return [...kept, { id: `e${seq.current++}`, from, fromPort, to, toPort, ...(slot ? { slot } : {}) }];
-      });
+      setEdges((es) => appendEdge(es, nodes, from, fromPort, to, toPort, `e${seq.current++}`));
       /*
        * 迭代边闭合即成框，三类迭代器同一条规则：流式（driver/challenger 的
        * 流向打分链）、离线（loader 的 batch 流向 encode——数据集是声明在框外，
@@ -535,12 +650,20 @@ export function WorkflowEditorPage() {
       const colocate = fromType === 'dataloader' && toType === 'generate' && toPort === 'prompts';
       if (streaming || offline || colocate) {
         setGraph((g) => {
+          /* 目标已在某个循环框里：不再重复建框（成员跨框共享会被 python 校验拒） */
           if ((g.frames ?? []).some((f) => f.memberIds?.includes(to))) return g;
           const mids = streaming
             ? edges
                 .flatMap((e) => (e.from === from && e.to !== to ? [e.to] : []).concat(e.to === from && (e.toPort === 'after' || e.toPort === 'prompts') ? [e.from] : []))
                 .filter((id) => nodes.some((n) => n.id === id && nodeDefOf(n)?.lifecycle === 'Stage'))
             : [];
+          /*
+           * 成员里已在别的框的节点剔除（如把已有框的 driver 再连给新阶段）——跨框
+           * 共享是提交期硬拒，不能靠用户自查；全被剔除则不建框（toast 不再吹闭环）。
+           */
+          const owned = new Set((g.frames ?? []).flatMap((f) => f.memberIds ?? []));
+          const members = [from, ...mids, to].filter((id) => !owned.has(id));
+          if (!members.length) return g;
           return {
             ...g,
             frames: [
@@ -557,7 +680,7 @@ export function WorkflowEditorPage() {
                 y: -40,
                 w: streaming || colocate ? 812 : 550,
                 h: streaming || colocate ? 760 : 520,
-                memberIds: [from, ...mids, to],
+                memberIds: members,
               },
             ],
           };
@@ -618,9 +741,7 @@ export function WorkflowEditorPage() {
      * CUDA_VISIBLE_DEVICES 并规划 DeviceGroup），集群模式给 ray 地址 + 总卡数。
      * 只如实携带；空本机卡表会被会话响亮拒绝（空分配 = 没有 GPU）。
      */
-    const resource: WorkflowResourceDecl = gpuSel.mode === 'cluster'
-      ? { mode: 'cluster', cluster_address: clusterAddress.trim(), cluster_gpus: gpuSel.count ?? 1 }
-      : { mode: 'local', cards: gpuSel.cards };
+    const resource: WorkflowResourceDecl = resourceDecl();
     return {
       version: graph.version ?? 5,
       /* 声明身份跟实验走（flow id）：同一预设开两个实验各自有会话与声明身份 */
@@ -630,7 +751,7 @@ export function WorkflowEditorPage() {
         id: n.id,
         type: n.type,
         params: Object.fromEntries(
-          (n.params ?? NODE_TYPES[n.type].params).map((p) => [
+          paramsOf(n).map((p) => [
             p.label,
             coerceParam(p.value, p.ptype ?? paramTypeOf(n.type, p.label)),
           ]),
@@ -645,7 +766,15 @@ export function WorkflowEditorPage() {
         target_port: e.toPort,
         ...(e.slot ? { slot: e.slot } : {}),
       })),
-      frames: frames.map((f) => {
+      /*
+       * 只有带成员的框才进提交：无成员的是纯视觉分区（GraphFrame 契约：没给
+       * memberIds 就是手排坐标的视觉框），发出去会被 python 以「members 不能
+       * 为空」硬拒——历史编辑残留的空框（memberIds: []）同样不携带。序号在
+       * 这层就别让它带进提交面。
+       */
+      frames: frames
+        .filter((f) => (f.memberIds ?? []).length > 0)
+        .map((f) => {
         const members = f.memberIds ?? [];
         /* v3 帧契约：sources 必须明确列出全部 Iterator 成员；consumers 是全部
          * 非 source 成员（覆盖全部带 effects 的节点）；budget_owner 是其中
@@ -761,12 +890,15 @@ export function WorkflowEditorPage() {
       if (['released', 'lost'].includes(session.state)) return;
       setRunId(session.id);
       /* 资源页按最近一次提交生效的声明回填：切页回来选卡不丢，重新运行
-       * 不会因为「选卡丢了只勾了一张」而被放置规划拒绝。 */
-      if (session.resource?.mode === 'cluster') {
-        setGpuSel({ mode: 'cluster', cards: [], count: session.resource.cluster_gpus });
-        if (session.resource.cluster_address) setClusterAddress(session.resource.cluster_address);
-      } else if (session.resource?.mode === 'local' && session.resource.cards?.length) {
-        setGpuSel({ mode: 'local', cards: session.resource.cards, count: undefined });
+       * 不会因为「选卡丢了只勾了一张」而被放置规划拒绝。落盘声明已回填
+       * 时跳过——快照是上次运行的旧声明，不能盖掉用户之后的新选择。 */
+      if (!resourceFromGraph.current) {
+        if (session.resource?.mode === 'cluster') {
+          setGpuSel({ mode: 'cluster', cards: [], count: session.resource.cluster_gpus });
+          if (session.resource.cluster_address) setClusterAddress(session.resource.cluster_address);
+        } else if (session.resource?.mode === 'local' && session.resource.cards?.length) {
+          setGpuSel({ mode: 'local', cards: session.resource.cards, count: undefined });
+        }
       }
       if (['queued', 'running', 'pausing', 'paused', 'stopping'].includes(session.state) && session.request_id) {
         activeRun.current = {
@@ -795,9 +927,6 @@ export function WorkflowEditorPage() {
     })();
   };
 
-  /** 悬浮全局配置：资源页（本机选卡 / 集群地址+卡数），进声明的 resource 段 */
-  const [gpuSel, setGpuSel] = useState<GpuSelection>(EMPTY_GPU_SELECTION);
-  const [clusterAddress, setClusterAddress] = useState('');
   const [panelOpen, setPanelOpen] = useState(true);
 
   /** 提交与执行分开：提交中只锁入口，节点转动必须等真实 node.running。 */
@@ -819,7 +948,10 @@ export function WorkflowEditorPage() {
     setActiveEdges([]);
     setUsedEdges([]);
     openOnDone.current = target && settings.autoOpenOutput ? target : null;
-    setLogLines([]);
+    setSubmitTarget(target ?? '');
+    /* 占位行：会话启动（含冷启动 bootstrap）期间日志面板不空转，首轮轮询
+     * 拉回真实日志后自然覆盖 */
+    setLogLines([t('wf.startingSession')]);
     setLogOpen(true);
     /* 已落盘的实验：把这次跑的画布形态先写回持久层，列表页看到的与跑的一致 */
     if (flowId) {
@@ -846,6 +978,7 @@ export function WorkflowEditorPage() {
         if (pollGeneration.current === generation) {
           submittingRef.current = false;
           setSubmitting(false);
+          setSubmitTarget(null);
         }
       }
     })();
@@ -855,6 +988,28 @@ export function WorkflowEditorPage() {
   const runNode = (id: string) => {
     if (nodes.some((n) => n.id === id)) beginRun(id);
   };
+
+  /*
+   * 预热常驻会话：进编辑页就把冷启动（python import + ray + DeviceGroup
+   * 声明，实测十秒级）藏在用户看图的时间里，首次点运行不再干等。已保存
+   * 实验等加载完成（选卡回填就位）才预热，拿默认选卡预热会规划错
+   * DeviceGroup；未保存实验等选卡落定。防抖合并连续改卡；同 key 已有活
+   * 会话时后端只复用不重起。预热后改选卡的 rebuild_required 由运行提交
+   * 路径对从未运行过的会话自动释放重建兜底。失败静默：预热是优化不是
+   * 前置条件，运行提交会重走 ensureSession 并报真实错误。
+   */
+  useEffect(() => {
+    if (submittingRef.current || activeRun.current) return;
+    if (flowId && !flowLoaded.current) return;
+    const res = resourceDecl();
+    if (res.mode === 'local' ? !res.cards?.length : !res.cluster_address) return;
+    const handle = window.setTimeout(() => {
+      if (submittingRef.current || activeRun.current) return;
+      prewarmWorkflowSession(serializeGraph(), flowId ?? preset.key).catch(() => {});
+    }, 800);
+    return () => window.clearTimeout(handle);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [gpuSel, clusterAddress, flowId, preset.key]);
 
   /**
    * 启停控制。AI 的控制卡片和工具条上的按钮走的是同一条路。
@@ -917,7 +1072,9 @@ export function WorkflowEditorPage() {
           n.id === nodeId
             ? {
                 ...n,
-                params: (n.params ?? NODE_TYPES[n.type].params).map((p, i) =>
+                /* 与面板同源：面板渲染的是 paramsOf 合并列表，下标必须对齐
+                 * 同一份列表；写回合并全量，preset 覆盖子集从此不再遮蔽默认参数 */
+                params: paramsOf(n).map((p, i) =>
                   i === index ? { ...p, value } : p,
                 ),
               }
@@ -933,8 +1090,68 @@ export function WorkflowEditorPage() {
       return;
     }
     if (a.kind === 'addNode') {
-      addAtViewCenter(a.typeKey);
-      toast.success(t('wf.nodeAdded', { label: nodeLabel(NODE_TYPES[a.typeKey], t) || a.typeKey }));
+      const label = nodeLabel(NODE_TYPES[a.typeKey], t) || a.typeKey;
+      /* 裸提议（无参数/连线/进环）走老路：落一个默认节点让用户自己接 */
+      if (!a.params && !a.connections?.length && !a.frameId) {
+        addAtViewCenter(a.typeKey);
+        toast.success(t('wf.nodeAdded', { label }));
+        return;
+      }
+      /* 完整提议：节点 + 参数 + 连线 + 进环一次 guard 原子落图。
+       * 不走 connect()：它的自动建框读的是闭包里的旧节点表，看不见
+       * 刚落的新节点；AI 路径的进环由 frameId 显式声明，不靠自动推断。 */
+      guard(() => {
+        const id = `n${seq.current++}`;
+        const overrides = a.params;
+        const node: GraphNode = {
+          id,
+          type: a.typeKey,
+          x: viewCenter.current.x - NODE_W / 2,
+          y: viewCenter.current.y - 60,
+          status: 'idle',
+          ...(overrides
+            ? { params: NODE_TYPES[a.typeKey].params.map((p) =>
+                overrides[p.label] !== undefined ? { ...p, value: overrides[p.label] } : p) }
+            : {}),
+        };
+        const allNodes = [...nodes, node];
+        setNodes((ns) => [...ns, node]);
+        setSelected(id);
+        if (a.connections?.length) {
+          const conns = a.connections;
+          setEdges((es) => {
+            let next = es;
+            for (const c of conns) {
+              next = appendEdge(next, allNodes,
+                c.from === 'new' ? id : c.from, c.fromPort,
+                c.to === 'new' ? id : c.to, c.toPort, `e${seq.current++}`);
+            }
+            return next;
+          });
+        }
+        if (a.frameId) {
+          const frameId = a.frameId;
+          setGraph((g) => ({
+            ...g,
+            frames: (g.frames ?? []).map((f) =>
+              f.id === frameId ? { ...f, memberIds: [...(f.memberIds ?? []), id] } : f),
+          }));
+        }
+      });
+      toast.success(t('wf.nodeAdded', { label }));
+      return;
+    }
+    if (a.kind === 'addEdge') {
+      /* 两端都是已有节点：出卡时已校验端口/类型，这里只防应用前节点被删。
+       * 不自动建框：AI 路径的进环由 add_node 的 frameId 显式声明（同 addNode 口径） */
+      if (!nodes.some((n) => n.id === a.from) || !nodes.some((n) => n.id === a.to)) {
+        toast.warning(t('wf.nodeGone'));
+        return;
+      }
+      guard(() =>
+        setEdges((es) => appendEdge(es, nodes, a.from, a.fromPort, a.to, a.toPort, `e${seq.current++}`)),
+      );
+      toast.success(t('wf.edgeAdded', { from: `${a.from}:${a.fromPort}`, to: `${a.to}:${a.toPort}` }));
       return;
     }
     const target = nodes.find((n) => n.id === a.nodeId);
@@ -942,9 +1159,7 @@ export function WorkflowEditorPage() {
       toast.warning(t('wf.nodeGone'));
       return;
     }
-    const idx = (target.params ?? NODE_TYPES[target.type].params).findIndex(
-      (p) => p.label === a.label,
-    );
+    const idx = paramsOf(target).findIndex((p) => p.label === a.label);
     if (idx < 0) {
       toast.warning(t('wf.paramMissing', { label: nodeLabel(NODE_TYPES[target.type], t), param: a.label }));
       return;
@@ -1043,10 +1258,27 @@ export function WorkflowEditorPage() {
               </Button>
             </Hint>
           )}
-          {runState === 'running' ? (
-            <Button size="sm" className="rounded-full" onClick={() => control('stop')}>
-              <Square /> {t('task.stop')}
-            </Button>
+          {/* 运行控制面唯一入口：运行中暂停/停止，暂停中恢复/停止。
+              助手抽屉不再重复这套按钮，AI 提议的启停卡也走同一个 control() */}
+          {runState === 'running' || runState === 'paused' ? (
+            <>
+              {runState === 'running' ? (
+                <Hint title={t('wf.pauseHint')}>
+                  <Button variant="outline" size="sm" className="rounded-full" onClick={() => control('pause')}>
+                    <Pause /> {t('task.pause')}
+                  </Button>
+                </Hint>
+              ) : (
+                <Button variant="outline" size="sm" className="rounded-full" onClick={() => control('resume')}>
+                  <Play /> {t('task.resume')}
+                </Button>
+              )}
+              <Hint title={t('wf.stopHint')}>
+                <Button size="sm" className="rounded-full" onClick={() => control('stop')}>
+                  <Square /> {t('task.stop')}
+                </Button>
+              </Hint>
+            </>
           ) : (
             <>
               <Button size="sm" className="rounded-full" disabled={submitting} onClick={() => control('start')}>
@@ -1127,6 +1359,7 @@ export function WorkflowEditorPage() {
               guard(() => setEdges((es) => es.filter((e) => !ids.includes(e.id))))
             }
             onRunNode={runNode}
+            submitTarget={submitTarget}
             onOpenOutput={(id) => openInspector(id, 'output')}
             onAskAi={(id) => openInspector(id, 'ai')}
             onDuplicate={duplicate}
@@ -1138,14 +1371,17 @@ export function WorkflowEditorPage() {
               node={selectedNode}
               nodes={nodes}
               edges={edges}
+              frames={graph.frames ?? []}
               presetLabel={displayName}
               running={submitting || runState === 'running'}
+              submitting={submitTarget === selectedNode.id}
               aiEnabled={settings.aiEnabled}
               confirmBeforeApply={settings.aiConfirmBeforeApply}
               tab={inspectorTab}
               sessionId={runId ?? undefined}
               baseConv={aiBaseConv}
               model={aiModel}
+              apiKey={aiApiKey}
               onClose={() => setInspectorOpen(false)}
               onRun={runNode}
               onParamChange={setParamAt}
@@ -1224,6 +1460,7 @@ export function WorkflowEditorPage() {
         onClose={() => setAssistantOpen(false)}
         nodes={nodes}
         edges={edges}
+        frames={graph.frames ?? []}
         presetLabel={displayName}
         runState={runState}
         confirmBeforeApply={settings.aiConfirmBeforeApply}
@@ -1231,8 +1468,9 @@ export function WorkflowEditorPage() {
         onAction={applyAction}
         baseConv={aiBaseConv}
         model={aiModel}
+        apiKey={aiApiKey}
         modelOptions={aiModelOptions}
-        onModelChange={setAiModel}
+        onModelChange={(id) => { setAiModel(id); update('aiModel', id); }}
       />
 
       <AlertDialog open={confirmOpen} onOpenChange={setConfirmOpen}>

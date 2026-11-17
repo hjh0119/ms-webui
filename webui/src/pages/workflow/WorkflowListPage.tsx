@@ -56,12 +56,14 @@ export function WorkflowListPage() {
     setCreating(true);
     try {
       const preset = PRESETS.find((p) => p.key === presetKey);
+      /* 脚手架本身即 v5 契约：新建时必须把版本章写进落盘图，否则编辑页读入
+       * 按「缺 version 记 v4」走升级服务，每个新实验都弹一次转换框。 */
       const graph = preset
         ? (() => {
             const copy = clonePreset(preset);
-            return { nodes: copy.nodes, edges: copy.edges, ...(copy.frames ? { frames: copy.frames } : {}) };
+            return { version: copy.version ?? 5, nodes: copy.nodes, edges: copy.edges, ...(copy.frames ? { frames: copy.frames } : {}) };
           })()
-        : { nodes: [], edges: [] };
+        : { version: 5, nodes: [], edges: [] };
       const id = await createFlow(graph, preset
         ? { name: t(preset.label), preset: presetKey }
         : {});

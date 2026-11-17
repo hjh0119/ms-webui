@@ -121,6 +121,22 @@ export async function startWorkflowRun(graph: {
   return submission;
 }
 
+/** 预热常驻会话（只 spawn 不 run）：进编辑页就把冷启动藏在后台，首次点
+ * 运行不再干等 bootstrap。失败静默忽略——运行提交会重新起会话并报真实错误。 */
+export async function prewarmWorkflowSession(graph: {
+  nodes: WorkflowNodeDecl[];
+  edges: WorkflowEdgeDecl[];
+  frames?: WorkflowFrameDecl[];
+  resource?: WorkflowResourceDecl;
+}, workflowKey: string): Promise<void> {
+  const res = await fetch(apiBase() + '/api/workflow/prewarm', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ graph, workflowKey }),
+  });
+  if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error ?? String(res.status));
+}
+
 export async function getWorkflowSession(id: string): Promise<WorkflowSessionSnapshot> {
   const res = await fetch(`${apiBase()}/api/workflow/${id}`);
   if (!res.ok) throw new Error(tStatic('api.readRunFailed', { status: res.status }));

@@ -19,7 +19,7 @@ import type { NodeParam, NodeTypeDef, PortDef } from './nodeTypes';
  * 由此新增一个后端组件 = registry.py 加 descriptor + 这里加一行 UI_EXTRAS。
  */
 
-interface RegistryPort {
+export interface RegistryPort {
   key: string;
   kind: string;
   role: string;
@@ -30,7 +30,7 @@ interface RegistryPort {
   accepted_kinds?: string[];
 }
 
-interface RegistryParam {
+export interface RegistryParam {
   name: string;
   label: string;
   /** v3 的默认值是任意 JSON 类型（dict/list/bool/number/str）；展示层转文本 */
@@ -42,7 +42,7 @@ interface RegistryParam {
   required?: boolean;
 }
 
-interface RegistryComponent {
+export interface RegistryComponent {
   type: string;
   label: string;
   /** Resource / Iterator / Stage / Task：构建与调用次数的声明，不是后台状态 */

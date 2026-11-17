@@ -1,24 +1,16 @@
 import { useEffect, useState } from 'react';
-import { Bot, Pause, Play, Square } from 'lucide-react';
-import { cn } from 'cn';
-import { Hint } from '@/components/Hint';
-import { Button } from '@/components/ui/button';
+import { Bot } from 'lucide-react';
 import { SelectInput } from '@/components/FormField';
 import { EngineApprovalCard } from '@/components/EngineApprovalCard';
 import { AiChatPanel } from '@/components/AiChatPanel';
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet';
-import type { GraphEdge, GraphNode } from './nodeTypes';
+import { useChats } from '@/store/chats';
+import type { GraphEdge, GraphFrame, GraphNode } from './nodeTypes';
 import type { AiAction, FlowMessage } from './aiAssist';
 import { describeAction, flowIntro, useFlowAiChat } from './aiAssist';
-import { useT, type MessageKey } from '@/i18n';
+import { useT } from '@/i18n';
 
 export type RunState = 'idle' | 'running' | 'paused';
-
-const RUN: Record<RunState, { text: MessageKey; tone: string }> = {
-  idle: { text: 'wf.runIdle', tone: 'text-muted-foreground' },
-  running: { text: 'task.running', tone: 'text-emerald-500' },
-  paused: { text: 'wf.runPaused', tone: 'text-amber-500' },
-};
 
 /**
  * 整图 AI 助手抽屉（功能 3）。
@@ -28,15 +20,15 @@ const RUN: Record<RunState, { text: MessageKey; tone: string }> = {
  * server 引擎执行（useFlowAiChat），动作提议（改参数/加节点/启停）经
  * 页面工具挂起协议上抛成本页卡片，用户点「应用」才落图。
  *
- * 顶上那排启停按钮是有意放在这里的：AI 提议「暂停」的时候，
- * 用户可以选择点卡片让它代劳，也可以自己按按钮。
- * 不给手动出口的话，AI 就从助手变成了唯一通道。
+ * 手动启停与运行状态都不在这里重复：控制面唯一入口是画布工具栏（运行/
+ * 暂停/恢复/停止），进度看画布节点点亮；AI 提议的启停卡应用后也走同一个 control()。
  */
 export function FlowAssistant({
   open,
   onClose,
   nodes,
   edges,
+  frames,
   presetLabel,
   runState,
   confirmBeforeApply,
@@ -44,6 +36,7 @@ export function FlowAssistant({
   onAction,
   baseConv,
   model,
+  apiKey,
   modelOptions,
   onModelChange,
 }: {
@@ -51,38 +44,49 @@ export function FlowAssistant({
   onClose: () => void;
   nodes: GraphNode[];
   edges: GraphEdge[];
+  /** 循环框：进 AI 上下文，助手才能把新阶段提议进环（add_node 的 frameId） */
+  frames?: GraphFrame[];
   presetLabel: string;
   runState: RunState;
   confirmBeforeApply: boolean;
   onControl: (op: 'start' | 'pause' | 'resume' | 'stop') => void;
   /** 非控制类提议（改参数、加节点）交给页面处理 */
   onAction: (a: AiAction) => void;
-  /** 会话锚点（wf-<flowId>）：turns 按会话×模型分桶，重开画布续上历史 */
+  /** 会话锚点（wf-<flowId>）：单流历史与模型无关，重开画布续上历史 */
   baseConv: string;
-  /** 当前模型 id（'' = 无可用模型，发送回落离线剧本） */
+  /** 当前模型 id（'' = 无可用模型，发送回落离线剧本）；只是执行者，切模型历史不动 */
   model: string;
+  /** MS 默认模型的会话令牌（随回合提交鉴权）；models.json 条目不传 */
+  apiKey?: string;
   modelOptions: { value: string; label: string }[];
   onModelChange: (id: string) => void;
 }) {
   const [draft, setDraft] = useState('');
   const running = runState === 'running';
   const { t } = useT();
-  const { messages, setMessages, streaming, send, stop, approvals, engineAlways, setEngineAlways, resolveEngineApproval } =
+  const chats = useChats();
+  const {
+    messages, setMessages, streaming, send, stop, convId, switchConv,
+    approvals, engineAlways, setEngineAlways, resolveEngineApproval,
+  } =
     useFlowAiChat({
       baseConv,
       model,
-      ctx: () => ({ nodes, edges, presetLabel, running }),
+      apiKey,
+      ctx: () => ({ nodes, edges, frames, presetLabel, running }),
       t,
       onControl,
+      confirmBeforeApply,
+      onAction,
     });
 
-  // 第一次打开时给一句开场白。之后再开保留上次的对话
+  // 打开时（或切到新会话后）消息为空就给开场白；之后再开保留上次的对话
   useEffect(() => {
     if (open && messages.length === 0) {
       setMessages([flowIntro({ nodes, edges, presetLabel, running }, t)]);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open]);
+  }, [open, messages.length]);
 
   const sendNow = () => {
     const text = draft.trim();
@@ -104,10 +108,6 @@ export function FlowAssistant({
     );
   };
 
-  const done = nodes.filter((n) => n.status === 'done').length;
-  const failed = nodes.filter((n) => n.status === 'failed').length;
-  const state = RUN[runState];
-
   return (
     /*
       不盖遮罩、不夺焦点：开着助手还要能看着画布上的节点一个个点亮。
@@ -126,61 +126,27 @@ export function FlowAssistant({
           </SheetTitle>
         </SheetHeader>
 
-        {/* 模型选择：引擎回合的执行列（无可用模型时发送回落离线剧本） */}
-        <div className="border-border/60 border-y px-4 py-2.5">
+        {/* 模型与会话两枚下拉（与页面助手同布局）：模型只是下一回合的执行者
+            （历史与模型无关）；会话默认锚在本实验，可选任一历史会话续聊 */}
+        <div className="border-border/60 flex items-center gap-2 border-y px-4 py-2.5">
           <SelectInput
             value={model}
             onChange={onModelChange}
             options={modelOptions}
             placeholder={t('assistant.noModel')}
             disabled={!modelOptions.length || streaming}
-            className="text-muted-foreground h-7 w-full gap-1.5 truncate border-0 px-2 text-xs shadow-none"
+            className="text-muted-foreground h-7 flex-1 gap-1.5 truncate border-0 px-2 text-xs shadow-none"
           />
-        </div>
-
-        {/* 状态条 + 手动启停。AI 能做的事，用户自己也得能做 */}
-        <div className="border-border/60 bg-secondary flex flex-wrap items-center gap-2 border-b px-3.5 py-2.5">
-          <span className={cn('inline-flex items-center gap-1.5 text-[12.5px]', state.tone)}>
-            <span
-              className={cn('size-[7px] rounded-full bg-current', running && 'status-dot-live')}
-            />
-            {t(state.text)}
-          </span>
-          <span className="text-muted-foreground text-xs">
-            {t('wf.doneCount', { done, total: nodes.length })}
-            {failed > 0 && <span className="text-red-500">　{t('wf.failedCount', { n: failed })}</span>}
-          </span>
-
-          <span className="ms-auto flex gap-1.5">
-            {running ? (
-              <Hint title={t('wf.pauseHint')}>
-                <Button variant="outline" size="sm" className="h-7 text-xs" onClick={() => onControl('pause')}>
-                  <Pause />
-                  {t('task.pause')}
-                </Button>
-              </Hint>
-            ) : (
-              <Button
-                size="sm"
-                className="h-7 text-xs"
-                onClick={() => onControl(runState === 'paused' ? 'resume' : 'start')}
-              >
-                <Play />
-                {runState === 'paused' ? t('task.resume') : t('wf.startBtn')}
-              </Button>
-            )}
-            <Hint title={t('wf.stopHint')}>
-              <Button
-                variant="outline"
-                size="icon"
-                className="text-destructive hover:text-destructive size-7"
-                disabled={runState === 'idle'}
-                onClick={() => onControl('stop')}
-              >
-                <Square />
-              </Button>
-            </Hint>
-          </span>
+          <SelectInput
+            value={convId}
+            onChange={switchConv}
+            options={[
+              { value: '', label: t('assistant.newSession') },
+              ...chats.map((c) => ({ value: c.id, label: c.title })),
+            ]}
+            disabled={streaming}
+            className="text-muted-foreground h-7 flex-1 gap-1.5 truncate border-0 px-2 text-xs shadow-none"
+          />
         </div>
 
         <AiChatPanel

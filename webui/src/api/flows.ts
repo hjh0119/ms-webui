@@ -8,6 +8,7 @@
 
 import { apiBase } from './base';
 import { tStatic } from '../i18n/static';
+import type { WorkflowResourceDecl } from './workflow';
 
 /** 列表条目：不含画布声明（列表页载荷小） */
 export interface FlowSummary {
@@ -27,6 +28,8 @@ export interface FlowGraph {
   nodes: unknown[];
   edges: unknown[];
   frames?: unknown[];
+  /** 资源页声明（本机选卡 / 集群地址+卡数）：随实验落盘，重进编辑页回填 */
+  resource?: WorkflowResourceDecl;
 }
 
 /** 单个实验的完整记录 */

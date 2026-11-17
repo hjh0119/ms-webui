@@ -3061,7 +3061,7 @@
           "name": "loss_kwargs",
           "label": "损失构造参数",
           "default": {},
-          "doc": "",
+          "doc": "键名绑定 kind 对应损失类（twinkle.loss）的构造器，未知键在构造前被拒绝。kind=grpo 常用：epsilon/epsilon_high（ratio 裁剪下/上界）、beta（到参考策略的 KL 罚系数，>0 需 ref_logps 在场——接 advantage.ref_out 或 train_step.reference）、entropy_coef（熵奖励系数）。其它 kind 的旋钮见对应损失类构造器",
           "options": [],
           "group": "",
           "type": "dict",

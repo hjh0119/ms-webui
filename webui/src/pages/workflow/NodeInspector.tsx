@@ -8,7 +8,7 @@ import { SegmentedControl } from '@/components/FormField';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
-import type { GraphEdge, GraphNode } from './nodeTypes';
+import type { GraphEdge, GraphFrame, GraphNode } from './nodeTypes';
 import { NODE_TYPES, nodeDefOf, nodeLabel } from './nodeTypes';
 import { OutputPreview, OutputPreviewDialog } from './OutputPreview';
 
@@ -45,8 +45,10 @@ export function NodeInspector({
   node,
   nodes,
   edges,
+  frames,
   presetLabel,
   running,
+  submitting = false,
   aiEnabled,
   confirmBeforeApply,
   tab,
@@ -58,12 +60,18 @@ export function NodeInspector({
   onTabChange,
   baseConv,
   model,
+  apiKey,
 }: {
   node: GraphNode;
   nodes: GraphNode[];
   edges: GraphEdge[];
+  /** 循环框：进 AI 上下文（与整图助手同会话，节点级提问也能提议进环） */
+  frames?: GraphFrame[];
   presetLabel: string;
   running: boolean;
+  /** 本节点的提交还在等会话回执（冷启动/图更新）：按钮转圈并禁点，
+   * 与画布节点上的运行入口同一份反馈 */
+  submitting?: boolean;
   aiEnabled: boolean;
   confirmBeforeApply: boolean;
   /**
@@ -87,6 +95,8 @@ export function NodeInspector({
   baseConv: string;
   /** 当前模型 id（'' = 无可用模型，发送回落离线剧本）；与整图助手共用一列 */
   model: string;
+  /** MS 默认模型的会话令牌（随回合提交鉴权）；models.json 条目不传 */
+  apiKey?: string;
 }) {
   const def = nodeDefOf(node) ?? NODE_TYPES[node.type];
   const { t } = useT();
@@ -107,9 +117,12 @@ export function NodeInspector({
     useFlowAiChat({
       baseConv,
       model,
-      ctx: () => ({ node, nodes, edges, presetLabel, running }),
+      apiKey,
+      ctx: () => ({ node, nodes, edges, frames, presetLabel, running }),
       t,
       onControl: () => undefined,
+      confirmBeforeApply,
+      onAction,
     });
 
   // 换节点才重开会话。只认 node.id：拖动节点位置、切 tab 都不该把对话清掉
@@ -201,17 +214,17 @@ export function NodeInspector({
               size="sm"
               variant={node.status === 'done' ? 'outline' : 'default'}
               className="ms-auto h-7 text-xs"
-              disabled={node.status === 'running'}
+              disabled={node.status === 'running' || submitting}
               onClick={() => onRun(node.id)}
             >
-              {node.status === 'running' ? (
+              {node.status === 'running' || submitting ? (
                 <Loader2 className="animate-spin" />
               ) : node.status === 'idle' ? (
                 <Play />
               ) : (
                 <RotateCw />
               )}
-              {node.status === 'idle' ? t('wf.runBtn') : node.status === 'running' ? t('task.running') : t('wf.rerunBtn')}
+              {node.status === 'running' || submitting ? t('task.running') : node.status === 'idle' ? t('wf.runBtn') : t('wf.rerunBtn')}
             </Button>
           </Hint>
         </div>

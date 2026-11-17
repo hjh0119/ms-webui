@@ -78,7 +78,7 @@ const GRPO: Preset = {
     N('g_loader', 'dataloader', X[0], 260, [P('batch_size', '4')]),
     N('g_driver', 'streaming_driver', X[1], 0, [P('tokenizer', TOKENIZER), P('template_config', TEMPLATE), P('rl_config', COMPLETION), P('async_mode', 'none'), P('max_staleness', '0'), P('num_generations', '4')]),
     N('g_score', 'score', X[2], 0),
-    N('g_adv', 'advantage', X[3], 0, [P('estimator', 'grpo')]),
+    N('g_adv', 'advantage', X[3], 0, [P('estimator', 'grpo'), P('num_generations', '4')]),
     N('g_train', 'train_step', X[4], 0, [P('tokenizer', TOKENIZER), P('template_config', TEMPLATE), P('lr', '1e-4'), P('gradient_accumulation_steps', '1'), P('micro_batch_size', '4')]),
     N('g_ckpt', 'checkpoint', X[5], 0, [P('profile', 'model')]),
     N('g_merge', 'merge', X[6], 0, [P('merge_config', '{"adapters": ["output/checkpoint-final"]}')]),
@@ -109,6 +109,9 @@ const GRPO: Preset = {
     E('g_train', 'then', 'g_sync', 'after'),
     E('g_sync', 'then', 'g_driver', 'after'),
     E('g_sampler', 'sampler', 'g_sync', 'targets', 'targets'),
+    /* 权重来源显式接原始策略模型节点：训练原地更新权重，policy 出口与 train 出口是同一对象；
+     * 接 policy 不依赖 train 的产出顺序，双模型图里也唯一钉死被训策略（与 GRPO_FULL/PPO 同口径） */
+    E('g_policy', 'model', 'g_sync', 'model'),
   ],
   frames: [{
     id: 'g_loop', label: 'wf.frameStreamLoop', note: 'wf.noteGrpo',
@@ -120,7 +123,9 @@ const GRPO: Preset = {
 /**
  * 全参 GRPO：同一张图——训练类型是参数档位不是拓扑分叉；参考模型是独立冻结
  * 副本，其前向 logps 接 advantage 的 ref_out（估计器把 ref_logps 写回轨迹，
- * KL 锦在训练目标里）。
+ * KL 锚在训练目标里）。loss 的 beta 必须显式给值：recipe 只在 beta>0 时才
+ * 建参考、GRPOLoss 只在 beta>0 时才读 ref_logps——beta 缺省 0 会让整条
+ * 参考链白算（grpo.sh 规范档 0.04）。
  */
 const GRPO_FULL: Preset = {
   ...GRPO,
@@ -130,6 +135,7 @@ const GRPO_FULL: Preset = {
   nodes: GRPO.nodes.map((n) => {
     if (n.id === 'g_policy') return { ...n, params: [P('model', TOKENIZER), P('train_type', 'full')] };
     if (n.id === 'g_train') return { ...n, params: [P('tokenizer', TOKENIZER), P('template_config', TEMPLATE), P('lr', '1e-6'), P('gradient_accumulation_steps', '1'), P('micro_batch_size', '4')] };
+    if (n.id === 'g_loss') return { ...n, params: [P('kind', 'grpo'), P('loss_kwargs', '{"beta": 0.04}')] };
     return n;
   }).concat([
     N('g_ref', 'model', -262, Y[1], [P('model', TOKENIZER), P('freeze', 'true')]),
@@ -139,9 +145,9 @@ const GRPO_FULL: Preset = {
     E('g_ref', 'model', 'g_refsig', 'model'),
     E('g_score', 'traj', 'g_refsig', 'traj'),
     E('g_refsig', 'out', 'g_adv', 'ref_out'),
-    /* 双模型（policy+ref）作用下 checkpoint / weight_sync 显式消歧：接前序输出 */
+    /* 双模型（policy+ref）作用下 checkpoint 显式消歧：接前序输出。
+     * weight_sync 的 model 边 GRPO.edges 已有，这里不再重复（重复 edge.id 会被提交校验硬拒） */
     E('g_train', 'model', 'g_ckpt', 'model'),
-    E('g_train', 'model', 'g_sync', 'model'),
   ]),
   frames: [{
     ...GRPO.frames![0],
@@ -150,8 +156,10 @@ const GRPO_FULL: Preset = {
 };
 
 /**
- * GRPO colocate：dataloader→generate 替代 streaming_driver（同步逐批生成），
- * 打分→优势→训练同构。无发布回环（同步形态权重常驻采样器）。
+ * GRPO 同步批式：dataloader→generate 替代 streaming_driver（同步逐批生成），
+ * 打分→优势→训练同构。平台的采样器与策略永远分卡（placement 没有共卡旋钮），
+ * 所以每批训练后经 weight_sync 把新权重推入采样器——没有这根回流，采样器
+ * 永远停在初始权重，训练改进到不了生成（recipe 的 RFT/GRPO 每轮都 sync）。
  */
 const GRPO_COLOCATE: Preset = {
   key: 'grpo_colocate',
@@ -162,12 +170,13 @@ const GRPO_COLOCATE: Preset = {
     N('c_loader', 'dataloader', X[1], 0, [P('batch_size', '4')]),
     N('c_gen', 'generate', X[2], 0, [P('num_generations', '4'), P('generation_config', GEN_ARGS)]),
     N('c_score', 'score', X[3], 0),
-    N('c_adv', 'advantage', X[4], 0, [P('estimator', 'grpo')]),
+    N('c_adv', 'advantage', X[4], 0, [P('estimator', 'grpo'), P('num_generations', '4')]),
     N('c_train', 'train_step', X[5], 0, [P('tokenizer', TOKENIZER), P('template_config', TEMPLATE), P('lr', '1e-4'), P('gradient_accumulation_steps', '1'), P('micro_batch_size', '4')]),
     N('c_ckpt', 'checkpoint', X[6], 0, [P('profile', 'model')]),
     N('c_merge', 'merge', X[7], 0, [P('merge_config', '{"adapters": ["output/checkpoint-final"]}')]),
     N('c_scor', 'scorer', X[3], 260, [P('kind', 'accuracy')]),
     N('c_loss', 'loss', X[5], 260, [P('kind', 'grpo')]),
+    N('c_sync', 'weight_sync', X[4], 520, undefined, { after: 'right', then: 'left' }),
     N('c_sampler', 'sampler', 0, Y[0], [P('model', TOKENIZER), P('engine', 'vllm'), P('engine_args', ENGINE_ARGS), P('template_config', TEMPLATE)]),
     N('c_policy', 'model', 0, Y[1], [P('model', TOKENIZER), P('train_type', 'lora')]),
   ],
@@ -183,11 +192,15 @@ const GRPO_COLOCATE: Preset = {
     E('c_policy', 'model', 'c_train', 'model'),
     E('c_train', 'step', 'c_ckpt', 'step'),
     E('c_ckpt', 'artifact', 'c_merge', 'artifact'),
+    /* 权重回流：每批训练后同步被训策略进采样器，下一批 generate 用新权重 */
+    E('c_policy', 'model', 'c_sync', 'model'),
+    E('c_sampler', 'sampler', 'c_sync', 'targets', 'targets'),
+    E('c_train', 'then', 'c_sync', 'after'),
   ],
   frames: [{
     id: 'c_loop', label: 'wf.frameTrainLoop', note: 'wf.noteColocateAuto',
-    x: 222, y: -40, w: 2080, h: 520,
-    memberIds: ['c_loader', 'c_gen', 'c_score', 'c_adv', 'c_train'],
+    x: 222, y: -40, w: 2080, h: 780,
+    memberIds: ['c_loader', 'c_gen', 'c_score', 'c_adv', 'c_train', 'c_sync'],
   }],
 };
 
@@ -196,6 +209,10 @@ const GRPO_COLOCATE: Preset = {
  * （接 advantage 的 value_out，GAE 估计器 delta_t = r_t + gamma·V_{t+1} − V_t
  * 递推），weight_average 把训练权重 EMA 进冻结参考。两个模型各占自己的
  * train_step；critic 的训练目标（returns/old_values）同样由 advantage 写回轨迹。
+ * GAE 硬要求 ref_out（token KL 的参考前向）与 value_out：参考 lane 由冻结
+ * p_ref 前向 logps 接 p_adv.ref_out，缺了会在估计时直接 raise。kwargs 对齐
+ * recipe：GAEAdvantage(kl_kind='k1', gamma=1.0, gae_lambda=0.95,
+ * normalize=whiten_rewards=False, kl_coef=0.05)。
  * 双模型作用下 checkpoint / weight_sync / weight_average 的模型身份从 train
  * 的 model 输出口显式接线（前序输出），不再从 actor 横拉。
  */
@@ -209,7 +226,9 @@ const PPO: Preset = {
     N('p_driver', 'streaming_driver', X[1], 0, [P('tokenizer', TOKENIZER), P('template_config', TEMPLATE), P('rl_config', COMPLETION), P('async_mode', 'none'), P('max_staleness', '0'), P('num_generations', '4')]),
     N('p_score', 'score', X[2], 0),
     N('p_vsig', 'model_forward', X[3], -260, [P('tokenizer', TOKENIZER), P('template_config', TEMPLATE), P('outputs', '["values"]')]),
-    N('p_adv', 'advantage', X[3], 0, [P('estimator', 'gae'), P('kwargs', '{"gamma": 1.0, "gae_lambda": 0.95}')]),
+    /* 参考前向：GAE 的 token KL 读 ref_out.logps，与 recipe 的冻结参考同口径 */
+    N('p_refsig', 'model_forward', X[2], -260, [P('tokenizer', TOKENIZER), P('template_config', TEMPLATE), P('outputs', '["logps"]')]),
+    N('p_adv', 'advantage', X[3], 0, [P('estimator', 'gae'), P('num_generations', '4'), P('kwargs', '{"gamma": 1.0, "gae_lambda": 0.95, "normalize": false, "kl_coef": 0.05, "kl_kind": "k1"}')]),
     N('p_train', 'train_step', X[4], 0, [P('tokenizer', TOKENIZER), P('template_config', TEMPLATE), P('lr', '1e-5'), P('gradient_accumulation_steps', '1'), P('micro_batch_size', '4')]),
     N('p_vtrain', 'train_step', X[5], -260, [P('tokenizer', TOKENIZER), P('template_config', TEMPLATE), P('lr', '1e-5'), P('gradient_accumulation_steps', '1'), P('micro_batch_size', '4')]),
     N('p_ckpt', 'checkpoint', X[5], 0, [P('profile', 'model')]),
@@ -237,6 +256,10 @@ const PPO: Preset = {
     E('p_driver', 'traj', 'p_vsig', 'traj'),
     E('p_value', 'model', 'p_vsig', 'model'),
     E('p_vsig', 'out', 'p_adv', 'value_out'),
+    /* 参考 lane：冻结副本前向 logps → GAE 的 ref_out（token KL 必需） */
+    E('p_ref', 'model', 'p_refsig', 'model'),
+    E('p_score', 'traj', 'p_refsig', 'traj'),
+    E('p_refsig', 'out', 'p_adv', 'ref_out'),
     E('p_adv', 'traj', 'p_train', 'batch'),
     E('p_loss', 'loss', 'p_train', 'loss'),
     E('p_policy', 'model', 'p_train', 'model'),
@@ -256,12 +279,12 @@ const PPO: Preset = {
     E('p_train', 'then', 'p_sync', 'after'),
     E('p_sync', 'then', 'p_driver', 'after'),
     E('p_sampler', 'sampler', 'p_sync', 'targets', 'targets'),
-    E('p_train', 'model', 'p_sync', 'model'),
+    E('p_policy', 'model', 'p_sync', 'model'),
   ],
   frames: [{
     id: 'p_loop', label: 'wf.frameStreamLoop', note: 'wf.notePpo',
     x: 222, y: -300, w: 1560, h: 1420,
-    memberIds: ['p_driver', 'p_score', 'p_vsig', 'p_adv', 'p_train', 'p_vtrain', 'p_wavg', 'p_sync'],
+    memberIds: ['p_driver', 'p_score', 'p_vsig', 'p_refsig', 'p_adv', 'p_train', 'p_vtrain', 'p_wavg', 'p_sync'],
   }],
 };
 
@@ -284,6 +307,7 @@ const RFT: Preset = {
     N('r_merge', 'merge', X[7], 0, [P('merge_config', '{"adapters": ["output/checkpoint-final"]}')]),
     N('r_scor', 'scorer', X[3], 260, [P('kind', 'accuracy')]),
     N('r_loss', 'loss', X[5], 260, [P('kind', 'cross_entropy')]),
+    N('r_sync', 'weight_sync', X[4], 520, undefined, { after: 'right', then: 'left' }),
     N('r_sampler', 'sampler', 0, Y[0], [P('model', TOKENIZER), P('engine', 'vllm'), P('engine_args', ENGINE_ARGS), P('template_config', TEMPLATE)]),
     N('r_policy', 'model', 0, Y[1], [P('model', TOKENIZER), P('train_type', 'lora')]),
   ],
@@ -300,11 +324,16 @@ const RFT: Preset = {
     E('r_policy', 'model', 'r_train', 'model'),
     E('r_train', 'step', 'r_ckpt', 'step'),
     E('r_ckpt', 'artifact', 'r_merge', 'artifact'),
+    /* 权重回流：recipe 每轮开头 sync_weights——批式图里每批训练后同步，
+     * 下一轮拒绝采样才采自改进后的策略 */
+    E('r_policy', 'model', 'r_sync', 'model'),
+    E('r_sampler', 'sampler', 'r_sync', 'targets', 'targets'),
+    E('r_train', 'then', 'r_sync', 'after'),
   ],
   frames: [{
     id: 'r_loop', label: 'wf.frameTrainLoop', note: 'wf.noteRft',
-    x: 222, y: -40, w: 2080, h: 520,
-    memberIds: ['r_loader', 'r_gen', 'r_score', 'r_sel', 'r_train'],
+    x: 222, y: -40, w: 2080, h: 780,
+    memberIds: ['r_loader', 'r_gen', 'r_score', 'r_sel', 'r_train', 'r_sync'],
   }],
 };
 
@@ -359,17 +388,20 @@ const OPD_MT: Preset = {
   }],
 };
 
-/** OPSD：单教师版——一路 teacher logps 直进损失，GKD logits 契约由 loss 参数选择。 */
+/** OPSD：单教师版——一路 teacher logps 直进损失，GKD logits 契约由 loss 参数选择。
+ * 派生顺序：先把 o_tsig1→o_mix 的边重接到 o_train.teacher（含 id 更新），再滤掉
+ * 第二教师与混合器——先滤后接会把待重接的边先删掉，teacher 口空接，opsd 损失
+ * 在 teacher=None 时静默返回 0，整轮训练空转。 */
 const OPSD: Preset = {
   key: 'opsd',
   label: 'wf.presetOpsd',
   desc: 'wf.presetOpsdDesc',
   nodes: OPD_MT.nodes.filter((n) => n.id !== 'o_teach2' && n.id !== 'o_tsig2' && n.id !== 'o_mix'),
   edges: OPD_MT.edges
-    .filter((e) => e.from !== 'o_teach2' && e.from !== 'o_tsig2' && e.from !== 'o_mix'
-      && e.to !== 'o_tsig2' && e.to !== 'o_mix')
     .map((e) => (e.from === 'o_tsig1' && e.to === 'o_mix'
-      ? { ...e, to: 'o_train', toPort: 'teacher', slot: undefined } : e)),
+      ? { ...e, id: 'o_tsig1.out-o_train.teacher', to: 'o_train', toPort: 'teacher', slot: undefined } : e))
+    .filter((e) => e.from !== 'o_teach2' && e.from !== 'o_tsig2' && e.from !== 'o_mix'
+      && e.to !== 'o_tsig2' && e.to !== 'o_mix'),
   frames: [{
     ...OPD_MT.frames![0],
     memberIds: (OPD_MT.frames![0].memberIds ?? []).filter((id) => id !== 'o_tsig2' && id !== 'o_mix'),
@@ -422,15 +454,18 @@ const SFT_FULL: Preset = {
 };
 
 /**
- * DPO（偏好对）：数据经 loader 直入训练步（paired 编码在内部完成）；参考分支
- * 从独立冻结副本前向读 ref logps，接 train_step 的 reference 口。
+ * DPO（偏好对）：数据经 loader 直入训练步——配对行（带 rejected 侧）由
+ * encode_rows 编成 chosen/rejected 交错批（与 recipe 的 PreferenceEncoder
+ * 同布局），参考分支从独立冻结副本前向读 ref logps，接 train_step 的
+ * reference 口。数据集必须是配对格式：KTO 集（只有二值 label）没有
+ * rejected 侧，DPO 损失会把无关行当偏好对静默训下去。
  */
 const DPO: Preset = {
   key: 'dpo',
   label: 'wf.presetDpo',
   desc: 'wf.presetDpoDesc',
   nodes: [
-    N('d_data', 'dataset', X[0], 0, [P('dataset', '["AI-ModelScope/ultrafeedback-binarized-preferences-cleaned-kto"]')]),
+    N('d_data', 'dataset', X[0], 0, [P('dataset', '["AI-ModelScope/orpo-dpo-mix-40k"]')]),
     N('d_loader', 'dataloader', X[1], 0, [P('batch_size', '4'), P('source', 'rows')]),
     N('d_rsig', 'model_forward', X[2], -260, [P('tokenizer', TOKENIZER), P('template_config', TEMPLATE), P('outputs', '["logps"]')]),
     N('d_train', 'train_step', X[2], 0, [P('tokenizer', TOKENIZER), P('template_config', TEMPLATE), P('lr', '5e-6'), P('gradient_accumulation_steps', '1'), P('micro_batch_size', '4')]),
@@ -502,6 +537,7 @@ const TCPO: Preset = {
     E('t_train', 'step', 't_ckpt', 'step'),
     E('t_chal', 'source', 't_sync', 'source'),
     E('t_sampler', 'sampler', 't_sync', 'targets', 'targets'),
+    E('t_policy', 'model', 't_sync', 'model'),
     E('t_train', 'then', 't_sync', 'after'),
     E('t_sync', 'then', 't_chal', 'after'),
   ],
@@ -515,7 +551,9 @@ const TCPO: Preset = {
 /**
  * PSC（提议者-求解者自博弈）：一个 challenger 双路出流——questions 训提议者、
  * answers 由求解者模型驱动的多轮机制产生（solver 线走 rollout 资源）；出题
- * backend 是提议者的采样引擎，判官走评分参数。
+ * backend 是提议者的采样引擎，判官走评分参数。求解者是 s_sam2 按 model 参数
+ * 自建的固定基座策略（采样器没有模型输入口，本预设只训提议者），图上不再
+ * 放一个接不上的 solver 模型节点。
  */
 const PSC: Preset = {
   key: 'psc',
@@ -537,7 +575,6 @@ const PSC: Preset = {
     N('s_sampler', 'sampler', -262, Y[0], [P('model', TOKENIZER), P('engine', 'vllm'), P('engine_args', ENGINE_ARGS_AGENTIC), P('template_config', TEMPLATE)]),
     N('s_sam2', 'sampler', -262, Y[1], [P('model', TOKENIZER), P('engine', 'vllm'), P('engine_args', ENGINE_ARGS_AGENTIC), P('template_config', TEMPLATE)]),
     N('s_prop', 'model', 0, Y[0], [P('model', TOKENIZER), P('train_type', 'lora')]),
-    N('s_solver', 'model', 0, Y[1], [P('model', TOKENIZER), P('train_type', 'lora')]),
     // 相对 workspace 落在会话目录下（sandbox_config 的 LocalEnv 原生字段）。
     N('s_env', 'sandbox_env', X[1], 520, [P('sandbox_config', '{"workspace": "workspace"}')]),
     N('s_sroll', 'rollout', X[1], 260, [P('tokenizer', TOKENIZER), P('template_config', TEMPLATE), P('max_turns', '4')]),
@@ -558,6 +595,8 @@ const PSC: Preset = {
     E('s_train', 'model', 's_ckpt', 'model'),
     E('s_chal', 'source', 's_sync', 'source'),
     E('s_sampler', 'sampler', 's_sync', 'targets', 'targets'),
+    /* 双模型（proposer+solver）下显式消歧：同步被训的 proposer，接它的原始模型节点 */
+    E('s_prop', 'model', 's_sync', 'model'),
     E('s_train', 'then', 's_sync', 'after'),
     E('s_sync', 'then', 's_chal', 'after'),
   ],
@@ -582,11 +621,12 @@ const RSI: Preset = {
     N('i_loader', 'dataloader', X[1], 260, [P('batch_size', '4')]),
     N('i_gen', 'generate', X[2], 260, [P('num_generations', '4'), P('generation_config', GEN_ARGS)]),
     N('i_score', 'score', X[3], 260),
-    N('i_adv', 'advantage', X[4], 260, [P('estimator', 'grpo')]),
+    N('i_adv', 'advantage', X[4], 260, [P('estimator', 'grpo'), P('num_generations', '4')]),
     N('i_train', 'train_step', X[5], 260, [P('tokenizer', TOKENIZER), P('template_config', TEMPLATE), P('lr', '1e-4'), P('gradient_accumulation_steps', '1'), P('micro_batch_size', '4')]),
     N('i_ckpt', 'checkpoint', X[6], 260, [P('profile', 'model')]),
     N('i_scor', 'scorer', X[3], 520, [P('kind', 'accuracy')]),
     N('i_loss', 'loss', X[5], 520, [P('kind', 'grpo')]),
+    N('i_sync', 'weight_sync', X[4], 780, undefined, { after: 'right', then: 'left' }),
     N('i_sampler', 'sampler', 0, Y[0], [P('model', TOKENIZER), P('engine', 'vllm'), P('engine_args', ENGINE_ARGS), P('template_config', TEMPLATE)]),
     N('i_policy', 'model', 0, Y[1], [P('model', TOKENIZER), P('train_type', 'lora')]),
     // 空工具集：仓内没有随包发布的工具插件模块（toolset 的 plugins 收插件
@@ -609,11 +649,15 @@ const RSI: Preset = {
     E('i_loss', 'loss', 'i_train', 'loss'),
     E('i_policy', 'model', 'i_train', 'model'),
     E('i_train', 'step', 'i_ckpt', 'step'),
+    /* 权重回流：每批训练后同步进采样器，下一批 episode 用新策略解题 */
+    E('i_policy', 'model', 'i_sync', 'model'),
+    E('i_sampler', 'sampler', 'i_sync', 'targets', 'targets'),
+    E('i_train', 'then', 'i_sync', 'after'),
   ],
   frames: [{
     id: 'i_loop', label: 'wf.frameEpisodeLoop', note: 'wf.noteRsi',
     x: 222, y: 200, w: 2080, h: 720,
-    memberIds: ['i_loader', 'i_gen', 'i_score', 'i_adv', 'i_train'],
+    memberIds: ['i_loader', 'i_gen', 'i_score', 'i_adv', 'i_train', 'i_sync'],
   }],
 };
 

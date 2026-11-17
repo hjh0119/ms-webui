@@ -4756,8 +4756,34 @@ function swiftApiPlugin(): Plugin {
         resource?: any;
       }
 
+      /* 会话注册表刻意只在内存：webui 重启 = 所有编排运行终止、子进程随之退出、
+       * GPU 释放（与任务页停止同语义，用户裁决）。浏览器刷新不在此列——页面
+       * 重挂时经 restoreSession 按 key 接回在途运行。不做落盘重接管。 */
       const workflowSessions = new Map<string, WorkflowSession>(); // id -> session
       const workflowKeys = new Map<string, string>(); // key -> session id
+
+      /*
+       * 热重启生命周期：vite 改配置重启是同进程内重启（node 进程不退出、子进程
+       * stdin 不断 EOF），configureServer 重跑会重建上面两张注册表——旧会话进程
+       * 若不清理就被新注册表遗忘，继续占着 GPU，预热又起一份新的（同一实验多份
+       * 占卡）。server 关闭（热重启 / 整体退出）时给注册表内每个会话发 release
+       * 让进程自行收尾；10s 不退则 SIGKILL 兜底（ray actor 与 driver 共命运，
+       * driver 死则 raylet 回收）。整进程被杀的场景不依赖此钩子：stdin EOF 会让
+       * session.py 自己走 _release + twinkle.shutdown 退出。
+       */
+      server.httpServer?.on('close', () => {
+        for (const s of workflowSessions.values()) {
+          const proc = s.proc;
+          if (!proc || proc.exitCode !== null || proc.killed) continue;
+          sendSessionCommand(s, { op: 'release' });
+          const timer = setTimeout(() => {
+            if (proc.exitCode === null && !proc.killed) proc.kill('SIGKILL');
+          }, 10_000);
+          proc.on('close', () => clearTimeout(timer));
+        }
+        workflowSessions.clear();
+        workflowKeys.clear();
+      });
 
       const WORKFLOW_EVENT_LIMIT = 500;
 
@@ -5219,6 +5245,26 @@ function swiftApiPlugin(): Plugin {
             }));
             return;
           }
+          /* 预热：进编辑页就把常驻会话起起来（只 spawn 不 run），把冷启动
+           * （python import + ray + DeviceGroup 声明）藏在用户看图的时间里，
+           * 首次点运行不再干等 bootstrap。失败由调用方静默忽略，运行提交
+           * 路径会重新走 ensureSession 并把真实错误报给用户。 */
+          if (req.method === 'POST' && seg0 === 'prewarm') {
+            const body = await readJsonBody(req);
+            const key = String(body?.workflowKey ?? body?.key ?? '').trim();
+            const graph = normalizeGraph(body?.graph);
+            if (key && !graph.workflow_id) graph.workflow_id = key;
+            if (!graph.nodes.length) {
+              res.statusCode = 400;
+              res.setHeader('Content-Type', 'application/json');
+              res.end(JSON.stringify({ error: '画布声明不完整：需要至少一个节点' }));
+              return;
+            }
+            const session = ensureSession(key, graph);
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ id: session.id, state: session.state }));
+            return;
+          }
           /* 发起/复用常驻会话并发 run 命令：同 key 不 spawn、资源常驻 */
           if (req.method === 'POST' && !seg0) {
             const body = await readJsonBody(req);
@@ -5256,39 +5302,76 @@ function swiftApiPlugin(): Plugin {
             session.activeNodes = [];
             session.activeEdges = [];
             session.usedEdges = [];
-            const updateId = sendSessionCommand(session, { op: 'update', declaration: graph });
-            const updated = updateId ? await waitForReply(session, updateId, 30_000) : null;
-            if (!updated?.ok || updated.state === 'reset_required' || session.state !== 'queued') {
-              if (session.state === 'queued') session.state = updated?.state ?? 'failed';
-              res.statusCode = updated ? 409 : 500;
+            /* update 发送+等回执；失败时把会话状态落定并返回错误响应体 */
+            const tryUpdate = async (s: WorkflowSession) => {
+              const updateId = sendSessionCommand(s, { op: 'update', declaration: graph });
+              const updated = updateId ? await waitForReply(s, updateId, 30_000) : null;
+              if (!updated?.ok || updated.state === 'reset_required' || s.state !== 'queued') {
+                if (s.state === 'queued') s.state = updated?.state ?? 'failed';
+                return {
+                  status: updated ? 409 : 500,
+                  /* rebuild_required 在回执的 state 字段里，error 文案不含该词，
+                   * 单独带出来供下方选卡兜底判定 */
+                  rebuild: updated?.state === 'rebuild_required',
+                  body: {
+                    /* 优先级：会话明确拒绝的报错 > 进程崩溃日志里的真实 Traceback
+                     * （bootstrap 失败即退出，没有回执）> reset 提示 > 笼统兜底。 */
+                    error: updated?.error
+                      ?? lastSessionError(s)
+                      ?? (updated?.state === 'reset_required'
+                        ? 'reset_required: 构造配置变化，需要明确重置或释放资源'
+                        : '会话未确认图更新，未提交运行（会话无回执，详情见运行日志）'),
+                    id: s.id,
+                  },
+                };
+              }
+              return null;
+            };
+            /* update 确认后的 run 提交：留档本次目标与资源声明，发 run 命令 */
+            const sendRun = (s: WorkflowSession) => {
+              s.lastRun = { ...(target ? { target } : {}), mode };
+              /* 本次生效的资源声明留档：页面回到实验时资源页按它回填 */
+              s.resource = graph.resource;
+              const requestId = sendSessionCommand(s, { op: 'run', target, mode, steps });
+              if (!requestId) {
+                s.state = 'lost';
+                return { status: 500, body: { error: '会话进程不可写（已退出）', id: s.id } };
+              }
+              return {
+                status: 200,
+                body: { id: s.id, session_id: s.id, request_id: requestId, command_seq: s.seq },
+              };
+            };
+            let failure = await tryUpdate(session);
+            /* 预热会话的选卡兜底：DeviceGroup 在 bootstrap 一次性声明不可运行期
+             * 改组，预热后用户改了选卡会撞 rebuild_required。从未运行过的会话
+             * （lastRun 空 = 只有预热没有训练状态）自动释放重起一份再试一次；
+             * 运行过的会话不自动重建，保留原来的显式报错。旧会话标 released
+             * 让 ensureSession 不再复用（release 命令已发，进程自行收尾）。 */
+            if (failure?.rebuild && !session.lastRun) {
+              sendSessionCommand(session, { op: 'release' });
+              session.state = 'released';
+              const fresh = ensureSession(key, graph);
+              fresh.state = 'queued';
+              failure = await tryUpdate(fresh);
+              if (!failure) {
+                const out = sendRun(fresh);
+                res.statusCode = out.status;
+                res.setHeader('Content-Type', 'application/json');
+                res.end(JSON.stringify(out.body));
+                return;
+              }
+            }
+            if (failure) {
+              res.statusCode = failure.status;
               res.setHeader('Content-Type', 'application/json');
-              res.end(JSON.stringify({
-                /* 优先级：会话明确拒绝的报错 > 进程崩溃日志里的真实 Traceback
-                 * （bootstrap 失败即退出，没有回执）> reset 提示 > 笼统兜底。 */
-                error: updated?.error
-                  ?? lastSessionError(session)
-                  ?? (updated?.state === 'reset_required'
-                    ? 'reset_required: 构造配置变化，需要明确重置或释放资源'
-                    : '会话未确认图更新，未提交运行（会话无回执，详情见运行日志）'),
-                id: session.id,
-              }));
+              res.end(JSON.stringify(failure.body));
               return;
             }
-            session.lastRun = { ...(target ? { target } : {}), mode };
-            /* 本次生效的资源声明留档：页面回到实验时资源页按它回填 */
-            session.resource = graph.resource;
-            const requestId = sendSessionCommand(session, { op: 'run', target, mode, steps });
-            if (!requestId) {
-              session.state = 'lost';
-              res.statusCode = 500;
-              res.setHeader('Content-Type', 'application/json');
-              res.end(JSON.stringify({ error: '会话进程不可写（已退出）', id: session.id }));
-              return;
-            }
+            const out = sendRun(session);
+            res.statusCode = out.status;
             res.setHeader('Content-Type', 'application/json');
-            res.end(JSON.stringify({
-              id: session.id, session_id: session.id, request_id: requestId, command_seq: session.seq,
-            }));
+            res.end(JSON.stringify(out.body));
             return;
           }
           /* 暂停/继续：运行中随时入队，回执立即返回（暂停在下一个节点边界生效） */
@@ -7253,7 +7336,7 @@ export default defineConfig({
      * 不在 Vite 默认放行名单里会被 403 拒掉。放开该网关后缀而非写死完整 host：
      * 域名里的 proxy-<port> 跟着端口走，端口让位后完整 host 会再次被拦。
      */
-    allowedHosts: ['.dsw-gateway-cn-beijing.data.aliyuncs.com'],
+    allowedHosts: ['.dsw-gateway-cn-beijing.data.aliyuncs.com', '.dsw-gateway-cn-shanghai.data.aliyuncs.com'],
     // 所在机器 fs.inotify.max_user_watches 只有 8192，且已被大仓库的索引进程占满，
     // 用 inotify 会直接 ENOSPC 崩掉。webui 自身文件很少，改用轮询更稳。
     watch: {

@@ -23,7 +23,7 @@ const registryChannels: Record<string, unknown> = registryData.channels as Recor
 /**
  * 通道的展示层（颜色 + 文案键）。语义真相源是 registry.json 的 channels
  * （20 个 kind）；本表只管长相，两者在下方的派生循环里合成 PORT_TYPES。
- * channels 里出现而本表没配的 kind 走兑底色，不再崩溃；本表里有而
+ * channels 里出现而本表没配的 kind 走兜底色，不再崩溃；本表里有而
  * channels 已除名的 kind（如旧图的 REWARD/ADV/SIGNAL）保留条目，
  * 旧画布数据在升级前仍可渲染。
  */
@@ -186,7 +186,7 @@ export interface NodeTypeDef {
  * UI_EXTRAS 表。加一种组件 = registry.py 加 descriptor + 重跑 export + UI_EXTRAS 加一行。
  */
 /*
- * 缺键兑底（Proxy）：v4 存量图携带的已删除节点类型（policy_endpoint / reduce /
+ * 缺键兜底（Proxy）：v4 存量图携带的已删除节点类型（policy_endpoint / reduce /
  * reward_shape 等）读注册表拿不到 def，任何 NODE_TYPES[type] 直接解引用都会当场崩。
  * 缺键一律兑 UNKNOWN_NODE_DEF 灰卡占位（零口零参、不可连线不可运行），旧图加载、
  * 升级副本预览、YAML/代码导出渲染占位而不是整页卸载。面板/类型列表不受影响
@@ -299,6 +299,26 @@ export function findPort(
   return (dir === 'in' ? def.inputs : def.outputs).find((p) => p.key === portKey);
 }
 
+/** 取节点当前生效的参数：注册表全量为底，节点覆盖值按 label 顺序消费。
+ *
+ * node.params 是「覆盖子集」——preset 只列它要改的几项（如 advantage 只列
+ * estimator/num_generations）。若直接返回子集，注册表里其余参数（如 kwargs）
+ * 就在面板上消失、set_node_param 也按名字找不到。故以默认全量为底叠加覆盖，
+ * 未覆盖的保留默认；注册表没有的覆盖项追加在后。重复 label（traj_filter 两个
+ * drop_if）按出现顺序逐个消费，不错位。面板/画布/YAML/提交/应用提议统一走这里。 */
+export function paramsOf(node: GraphNode): NodeParam[] {
+  const defaults = NODE_TYPES[node.type].params;
+  if (!node.params) return defaults;
+  const pending = [...node.params];
+  const merged = defaults.map((d) => {
+    const i = pending.findIndex((o) => o.label === d.label);
+    if (i < 0) return d;
+    const [o] = pending.splice(i, 1);
+    return { ...d, value: o.value };
+  });
+  return [...merged, ...pending];
+}
+
 /**
  * 节点级类型定义：内置类型直接取注册表形态；代码组件的端口与生命周期
  * 活在节点自己的 params 里（实例级声明，类型级 def 是空壳），在这里合成。
@@ -309,7 +329,7 @@ export function nodeDefOf(node: GraphNode): NodeTypeDef | undefined {
   const def = NODE_TYPES[node.type];
   if (!def || node.type !== 'code_component') return def;
   const raw = (name: string): string | undefined =>
-    (node.params ?? def.params).find((p) => p.label === name)?.value;
+    paramsOf(node).find((p) => p.label === name)?.value;
   const ports = (name: string): PortDef[] => {
     const text = raw(name);
     if (typeof text !== 'string' || !text.trim()) return [];

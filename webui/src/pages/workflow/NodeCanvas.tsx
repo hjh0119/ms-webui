@@ -43,7 +43,7 @@ import { toast } from 'sonner';
 import { cn } from 'cn';
 import { Hint } from '@/components/Hint';
 import { useT } from '@/i18n';
-import { NODE_TYPES, NODE_W, PORT_TYPES, findPortOf, nodeDefOf, nodeLabel } from './nodeTypes';
+import { NODE_TYPES, NODE_W, PORT_TYPES, findPortOf, nodeDefOf, nodeLabel, paramsOf } from './nodeTypes';
 import type { TFn } from './nodeTypes';
 import { ROLE_HINTS } from './registryNodes';
 import type { GraphEdge, GraphFrame, GraphNode, PortDef } from './nodeTypes';
@@ -58,7 +58,7 @@ const FRAME_PAD = 40;
 function nominalHeight(node: GraphNode): number {
   const def = nodeDefOf(node);
   if (!def) return 220;
-  return 48 + Math.max(def.inputs.length, def.outputs.length) * 30 + def.params.length * 32 + 24;
+  return 48 + Math.max(def.inputs.length, def.outputs.length) * 30 + paramsOf(node).length * 32 + 24;
 }
 
 /** 口身份的展示文案：有映射的 role 翻译，没映射的原样显示 */
@@ -114,6 +114,11 @@ interface NodeActions {
 }
 const ActionsCtx = createContext<NodeActions | null>(null);
 
+/** 提交等待中的目标节点（'' = 整图，null = 无提交）：会话启动期间 HTTP 还没回，
+ * 节点灯（轮询驱动）还没开始——被点的节点先转圈，不让它看起来没点上。
+ * 独立 context 不进 node.data：提交态变化不触发整图节点对象重建。 */
+const SubmitTargetCtx = createContext<string | null>(null);
+
 /** 切示例后的复位视角：留出边距但不缩太小，从数据流起点开始看 */
 const FIT_ON_LOAD: FitViewOptions = { padding: 0.1, minZoom: 0.72, maxZoom: 1 };
 /** 手点「适应」时才真缩到装下全图——GRPO 那张图展开有两千多像素宽 */
@@ -133,6 +138,8 @@ export interface NodeCanvasProps {
   onAddNode: (typeKey: string, x: number, y: number) => void;
   onConnect: (from: string, fromPort: string, to: string, toPort: string) => void;
   onRunNode: (id: string) => void;
+  /** 提交等待中的目标节点：被点的节点立即转圈（不等轮询点亮运行灯） */
+  submitTarget?: string | null;
   /** 打开这个节点的输出（跳到检查面板的输出 tab） */
   onOpenOutput?: (id: string) => void;
   /** 就这个节点问 AI */
@@ -172,6 +179,7 @@ function Canvas({
   onAddNode,
   onConnect,
   onRunNode,
+  submitTarget = null,
   onOpenOutput,
   onAskAi,
   aiEnabled = true,
@@ -438,6 +446,7 @@ function Canvas({
   return (
     <div ref={wrapRef} className="bg-titlebar relative min-w-0 flex-1">
       <ActionsCtx.Provider value={actions}>
+        <SubmitTargetCtx.Provider value={submitTarget}>
         <ReactFlow
           nodes={flowNodes}
           edges={flowEdges}
@@ -525,6 +534,7 @@ function Canvas({
             </ControlButton>
           </Controls>
         </ReactFlow>
+        </SubmitTargetCtx.Provider>
       </ActionsCtx.Provider>
     </div>
   );
@@ -554,13 +564,17 @@ const SwiftNodeView = memo(function SwiftNodeView({ id, data, selected }: NodePr
   const { node } = data as SwiftNodeData;
   const def = nodeDefOf(node) ?? NODE_TYPES[node.type];
   const act = useContext(ActionsCtx);
+  const submitTarget = useContext(SubmitTargetCtx);
   const link = useConnection(linkSelector);
   const { t } = useT();
   const [linkDir, linkType, linkFrom] = link.split('|');
 
-  const params = node.params ?? def.params;
+  /* 与检查面板同一份生效参数视图：preset 覆盖子集不遮蔽注册表默认项 */
+  const params = paramsOf(node);
   const code = node.code ?? def.code;
   const running = node.status === 'running';
+  /** 提交等待中（会话启动/图更新还没回执）：与运行中同样转圈 */
+  const pending = submitTarget === id;
   const hasOutput = node.status === 'done' || node.status === 'failed';
   /** 连线锁定：输出口拖不出来，标题栏挂个锁把原因说在提示里 */
   const locked = !!def.lockedPorts;
@@ -641,7 +655,7 @@ const SwiftNodeView = memo(function SwiftNodeView({ id, data, selected }: NodePr
           )}
           <Hint title={def.runnable ? t('wf.runNodeHint') : t('wf.declaredHint')}>
             <span className={HEADER_BTN} onClick={() => act?.onRunNode(id)}>
-              {running ? <Loader2 className="animate-spin" /> : <Play />}
+              {running || pending ? <Loader2 className="animate-spin" /> : <Play />}
             </span>
           </Hint>
           {act?.onOpenOutput && (
