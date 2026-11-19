@@ -60,6 +60,14 @@ export interface Settings {
    * （SWIFT_PYTHON 环境变量或内置路径）；填了就以它为准。
    */
   pythonPath: string | null;
+  /**
+   * twinkle-server 端点（remote 训练的全局默认）：网关根地址 + api key。
+   * 训练/研究任务的 server_base_url/server_api_key 参数优先，这里兜底；
+   * 空 = 未配置（remote 任务由 CLI validate 响亮报缺 url）。本地模式存
+   * 本机设置文件；展览模式只留浏览器会话内存。
+   */
+  serverBaseUrl: string | null;
+  serverApiKey: string | null;
   /** 对话默认采样参数 */
   chatDefaults: ChatDefaults;
   /**
@@ -83,6 +91,8 @@ const DEFAULTS: Settings = {
   autoOpenOutput: false,
   msToken: '',
   pythonPath: null,
+  serverBaseUrl: null,
+  serverApiKey: null,
   chatDefaults: { temperature: 0.7, topP: 0.8, maxTokens: 8192, thinking: 'mid' },
   systemPrompts: PRESET_SYSTEM_PROMPTS,
 };
@@ -110,7 +120,9 @@ function mergeSaved(saved: unknown): Settings {
   const theme: UiTheme =
     s.theme === 'light' || s.theme === 'dark' || s.theme === 'system' ? s.theme : 'system';
   const msToken = typeof s.msToken === 'string' ? s.msToken : '';
-  return { ...DEFAULTS, ...s, locale, theme, msToken, chatDefaults, systemPrompts };
+  const serverBaseUrl = typeof s.serverBaseUrl === 'string' ? s.serverBaseUrl : null;
+  const serverApiKey = typeof s.serverApiKey === 'string' ? s.serverApiKey : null;
+  return { ...DEFAULTS, ...s, locale, theme, msToken, serverBaseUrl, serverApiKey, chatDefaults, systemPrompts };
 }
 
 interface SettingsCtx {

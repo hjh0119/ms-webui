@@ -118,7 +118,7 @@ export function ExportNewPage() {
         setHubModelId(src.hubModelId ?? '');
         setPlugins(src.plugins ?? []);
         setExtraArgs(src.extraArgs ?? '');
-        setGpuSel(src.gpus?.length ? { mode: 'local', cards: src.gpus, count: undefined } : EMPTY_GPU_SELECTION);
+        setGpuSel(src.gpus?.length ? { ...EMPTY_GPU_SELECTION, mode: 'local', cards: src.gpus } : EMPTY_GPU_SELECTION);
       })
       .catch(() => {
         /* 后端暂不可达：保持空表单 */
@@ -142,9 +142,9 @@ export function ExportNewPage() {
     if (Array.isArray(f.plugins)) setPlugins(f.plugins.map(String).filter(Boolean));
     if (Array.isArray(f.gpus) && f.gpus.length) {
       setGpuSel({
+        ...EMPTY_GPU_SELECTION,
         mode: 'local',
         cards: f.gpus.map(Number).filter((n) => Number.isInteger(n) && n >= 0),
-        count: undefined,
       });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps

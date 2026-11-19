@@ -39,12 +39,16 @@ export interface WorkflowFrameDecl {
   budget_owner?: string;
 }
 
-/** 资源页声明：本机选卡（卡号）或集群（地址 + 总卡数） */
+/** 资源页声明：本机选卡（卡号）、集群（地址 + 总卡数）或 remote（twinkle-server 端点） */
 export interface WorkflowResourceDecl {
-  mode: 'local' | 'cluster';
+  mode: 'local' | 'cluster' | 'remote';
   cards?: number[];
   cluster_address?: string;
   cluster_gpus?: number;
+  /** remote：twinkle-server 地址（图会话 bootstrap 时 init_twinkle_client 用） */
+  server_url?: string;
+  /** remote：server 的 api key；空/无鉴权时可不带 */
+  server_api_key?: string;
 }
 
 /** 会话状态机（session.py 的 STATES） */

@@ -390,11 +390,17 @@ export function WorkflowEditorPage() {
          * 记下来源，会话快照回填不再覆盖它（快照是上次运行的旧声明）。 */
         const res = flow.graph.resource;
         if (res?.mode === 'cluster') {
-          setGpuSel({ mode: 'cluster', cards: [], count: res.cluster_gpus });
+          setGpuSel({ ...EMPTY_GPU_SELECTION, mode: 'cluster', count: res.cluster_gpus });
           setClusterAddress(res.cluster_address ?? '');
           resourceFromGraph.current = true;
+        } else if (res?.mode === 'remote' && res.server_url) {
+          setGpuSel({
+            ...EMPTY_GPU_SELECTION, mode: 'remote',
+            serverUrl: res.server_url, serverApiKey: res.server_api_key ?? '',
+          });
+          resourceFromGraph.current = true;
         } else if (res?.mode === 'local' && Array.isArray(res.cards)) {
-          setGpuSel({ mode: 'local', cards: res.cards, count: undefined });
+          setGpuSel({ ...EMPTY_GPU_SELECTION, mode: 'local', cards: res.cards });
           resourceFromGraph.current = true;
         }
         /* 画布就位后接管会话：setNodes 的恢复要落到加载后的节点上 */
@@ -457,7 +463,9 @@ export function WorkflowEditorPage() {
   /** 资源页声明的唯一转换口径：运行提交（serializeGraph）与保存（graphOut）共用 */
   const resourceDecl = (): WorkflowResourceDecl => gpuSel.mode === 'cluster'
     ? { mode: 'cluster', cluster_address: clusterAddress.trim(), cluster_gpus: gpuSel.count ?? 1 }
-    : { mode: 'local', cards: gpuSel.cards };
+    : gpuSel.mode === 'remote'
+      ? { mode: 'remote', server_url: gpuSel.serverUrl.trim(), server_api_key: gpuSel.serverApiKey.trim() }
+      : { mode: 'local', cards: gpuSel.cards };
 
   /** 画布三件套 + 资源声明的持久化形态（frames 为空时不带键；version 写画布真实版本——
    * 未升级的旧图存回去仍是旧版本，重读时升级流会再次接管，而不是被盖成 v5） */
@@ -893,11 +901,17 @@ export function WorkflowEditorPage() {
        * 不会因为「选卡丢了只勾了一张」而被放置规划拒绝。落盘声明已回填
        * 时跳过——快照是上次运行的旧声明，不能盖掉用户之后的新选择。 */
       if (!resourceFromGraph.current) {
-        if (session.resource?.mode === 'cluster') {
-          setGpuSel({ mode: 'cluster', cards: [], count: session.resource.cluster_gpus });
+        if (session.resource?.mode === 'remote' && session.resource.server_url) {
+          setGpuSel({
+            ...EMPTY_GPU_SELECTION, mode: 'remote',
+            serverUrl: session.resource.server_url,
+            serverApiKey: session.resource.server_api_key ?? '',
+          });
+        } else if (session.resource?.mode === 'cluster') {
+          setGpuSel({ ...EMPTY_GPU_SELECTION, mode: 'cluster', count: session.resource.cluster_gpus });
           if (session.resource.cluster_address) setClusterAddress(session.resource.cluster_address);
         } else if (session.resource?.mode === 'local' && session.resource.cards?.length) {
-          setGpuSel({ mode: 'local', cards: session.resource.cards, count: undefined });
+          setGpuSel({ ...EMPTY_GPU_SELECTION, mode: 'local', cards: session.resource.cards });
         }
       }
       if (['queued', 'running', 'pausing', 'paused', 'stopping'].includes(session.state) && session.request_id) {
@@ -1002,7 +1016,10 @@ export function WorkflowEditorPage() {
     if (submittingRef.current || activeRun.current) return;
     if (flowId && !flowLoaded.current) return;
     const res = resourceDecl();
-    if (res.mode === 'local' ? !res.cards?.length : !res.cluster_address) return;
+    /* remote 只需端点就绪（模型在 server 上，无卡可探）；url 空则不预热 */
+    const resourceReady = res.mode === 'local' ? !!res.cards?.length
+      : res.mode === 'remote' ? !!res.server_url : !!res.cluster_address;
+    if (!resourceReady) return;
     const handle = window.setTimeout(() => {
       if (submittingRef.current || activeRun.current) return;
       prewarmWorkflowSession(serializeGraph(), flowId ?? preset.key).catch(() => {});
@@ -1316,7 +1333,7 @@ export function WorkflowEditorPage() {
                 {t('wf.globalConfigHint')}
               </p>
               <div className="mt-2">
-                <GpuPicker value={gpuSel} onChange={setGpuSel} />
+                <GpuPicker value={gpuSel} onChange={setGpuSel} allowRemote />
                 {gpuSel.mode === 'cluster' && (
                   <label className="mt-2.5 block">
                     <span className="text-muted-foreground mb-1 block text-xs">{t('wf.clusterAddress')}</span>

@@ -441,6 +441,30 @@ export function SettingsPage() {
               className="w-64"
             />
           </Row>
+          {/*
+           * twinkle-server 端点：remote 训练（--mode remote）的全局默认。任务级
+           * server_base_url/server_api_key 参数优先、这里兜底；每次 spawn 现读，
+           * 改完即生效。url 填网关根（如 http://host:8300，/api/v1 前缀自动补）。
+           */}
+          <Row label={t('settings.serverUrl')} hint={t('settings.serverUrlHint')}>
+            <Input
+              value={settings.serverBaseUrl ?? ''}
+              onChange={(e) => update('serverBaseUrl', e.target.value.trim() || null)}
+              placeholder="http://127.0.0.1:8300"
+              spellCheck={false}
+              className="w-64"
+            />
+          </Row>
+          <Row label={t('settings.serverApiKey')} hint={t('settings.serverApiKeyHint')}>
+            <Input
+              value={settings.serverApiKey ?? ''}
+              onChange={(e) => update('serverApiKey', e.target.value.trim() || null)}
+              placeholder={t('settings.serverApiKeyOptional')}
+              spellCheck={false}
+              type="password"
+              className="w-64"
+            />
+          </Row>
         </Group>
 
         {/*

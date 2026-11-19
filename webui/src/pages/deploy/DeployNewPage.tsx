@@ -114,9 +114,9 @@ export function DeployNewPage() {
         setAdapters(src.adapters ?? []);
         setGpuSel(
           src.gpus?.length
-            ? { mode: 'local', cards: src.gpus, count: undefined }
+            ? { ...EMPTY_GPU_SELECTION, mode: 'local', cards: src.gpus }
             : src.gpuCount
-              ? { mode: 'cluster', cards: [], count: src.gpuCount }
+              ? { ...EMPTY_GPU_SELECTION, mode: 'cluster', count: src.gpuCount }
               : EMPTY_GPU_SELECTION,
         );
       })
@@ -141,12 +141,12 @@ export function DeployNewPage() {
     if (Array.isArray(f.adapters)) setAdapters(f.adapters.map(String).filter(Boolean));
     if (Array.isArray(f.gpus) && f.gpus.length) {
       setGpuSel({
+        ...EMPTY_GPU_SELECTION,
         mode: 'local',
         cards: f.gpus.map(Number).filter((n) => Number.isInteger(n) && n >= 0),
-        count: undefined,
       });
     } else if (Number.isInteger(f.gpuCount) && (f.gpuCount as number) > 0) {
-      setGpuSel({ mode: 'cluster', cards: [], count: f.gpuCount as number });
+      setGpuSel({ ...EMPTY_GPU_SELECTION, mode: 'cluster', count: f.gpuCount as number });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);

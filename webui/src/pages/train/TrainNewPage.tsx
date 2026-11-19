@@ -260,7 +260,9 @@ export function TrainNewPage() {
         if (src.taskType === 'code') {
           setMode('code');
           setCodeGpuSel(
-            src.gpus?.length ? { mode: 'local', cards: src.gpus, count: undefined } : EMPTY_GPU_SELECTION,
+            src.gpus?.length
+              ? { ...EMPTY_GPU_SELECTION, mode: 'local', cards: src.gpus }
+              : EMPTY_GPU_SELECTION,
           );
           fsTool({ op: 'read', path: `train-code/${src.id}.py` })
             .then((r) => setCode(String(r.content ?? '')))
@@ -292,9 +294,9 @@ export function TrainNewPage() {
         setExtraArgs(src.extraArgs ?? '');
         setGpuSel(
           src.gpus?.length
-            ? { mode: 'local', cards: src.gpus, count: undefined }
+            ? { ...EMPTY_GPU_SELECTION, mode: 'local', cards: src.gpus }
             : src.gpuCount
-              ? { mode: 'cluster', cards: [], count: src.gpuCount }
+              ? { ...EMPTY_GPU_SELECTION, mode: 'cluster', count: src.gpuCount }
               : EMPTY_GPU_SELECTION,
         );
       })
@@ -314,7 +316,7 @@ export function TrainNewPage() {
       setMode('code');
       setCode(f.code);
       if (Array.isArray(f.gpus) && f.gpus.length) {
-        setCodeGpuSel({ mode: 'local', cards: f.gpus.map(Number).filter(Number.isInteger), count: undefined });
+        setCodeGpuSel({ ...EMPTY_GPU_SELECTION, mode: 'local', cards: f.gpus.map(Number).filter(Number.isInteger) });
       }
       return;
     }
@@ -333,7 +335,7 @@ export function TrainNewPage() {
       setParams(kv);
     }
     if (Array.isArray(f.gpus) && f.gpus.length) {
-      setGpuSel({ mode: 'local', cards: f.gpus.map(Number).filter(Number.isInteger), count: undefined });
+      setGpuSel({ ...EMPTY_GPU_SELECTION, mode: 'local', cards: f.gpus.map(Number).filter(Number.isInteger) });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -748,8 +750,8 @@ export function TrainNewPage() {
         const nums = v.split(/[\s,]+/).map(Number).filter(Number.isInteger);
         setGpuSel(
           gpuSel.mode === 'cluster'
-            ? { mode: 'cluster', cards: [], count: nums[0] }
-            : { mode: 'local', cards: nums, count: undefined },
+            ? { ...EMPTY_GPU_SELECTION, mode: 'cluster', count: nums[0] }
+            : { ...EMPTY_GPU_SELECTION, mode: 'local', cards: nums },
         );
       },
     },

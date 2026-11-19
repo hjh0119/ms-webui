@@ -99,6 +99,13 @@ function webuiSettingsFile(): string {
 /** 服务端只需要 pythonPath 这个字段有默认；其余字段默认值由前端 Settings 补全 */
 interface WebuiSettingsFile {
   pythonPath?: string | null;
+  /*
+   * twinkle-server 端点偏好（remote 训练的全局默认，与 pythonPath 同级）：
+   * 任务级 server_base_url/server_api_key 参数优先，这里兜底。token 落
+   * 本机设置文件——与 ModelScope 令牌同一存储面，非展览模式专用。
+   */
+  serverBaseUrl?: string | null;
+  serverApiKey?: string | null;
   [key: string]: unknown;
 }
 
@@ -1597,6 +1604,12 @@ interface TrainTask {
   /** 表单训练旋钮（key = CLI flag 名，value 为标量） */
   params: Record<string, string | number | boolean>;
   /*
+   * remote 形态的 server 侧 run id（driver 日志回显解析：add_adapter 的
+   * training id 或 save 的 twinkle:// URI 首段）。ckpt 列表/prune/停止的
+   * server API 转发都靠它把 webui 任务映射到 server training_run。
+   */
+  remoteRunId?: string;
+  /*
    * 关注指标（创建页按任务类型预选、可增删）：详情/对比页按它决定画哪几张
    * 曲线。不进 params——params 的 key 是 CLI flag 名，会拼进 spawn 命令行。
    */
@@ -1710,9 +1723,23 @@ function syncTrainMetricsFile(task: TrainTask): void {
   }
 }
 
+/*
+ * remote 形态的 server 侧 run id 从 driver 回显行解析：swift.dev 侧两处日志——
+ * add_adapter 时的「[remote] server training created: id=xxx」与每次 save 的
+ * 「remote checkpoint saved: twinkle://<run>/...」（URI 首段即 run id）。pushTrainLog
+ * 逐行捕获；收编/历史恢复路径扫已落盘的日志行复用同一条解析。
+ */
+function remoteRunIdFromLine(line: string): string | undefined {
+  return (line.match(/server training created: id=(\S+)/) ?? line.match(/twinkle:\/\/([^/\s]+)/))?.[1];
+}
+
 function pushTrainLog(task: TrainTask, line: string): void {
   /* 落盘日志：重启收编后 read_train_log 仍可读（与脚本任务同一约定） */
   pushTaskLog(task, line, (l) => appendFileSync(join(dirname(task.outputDir), 'output.log'), `${l}\n`));
+  if (task.params.mode === 'remote' && !task.remoteRunId) {
+    const rid = remoteRunIdFromLine(line);
+    if (rid) task.remoteRunId = rid;
+  }
   /*
    * 训练日志的权威进度行是 swift.dev 自己打的 logger 行：
    *   [INFO:swift.dev] step 3  loss=2.2546  lr=5.000000e-05  grad_norm=11.3125  reward=0.0312
@@ -1794,6 +1821,8 @@ function datasetEntry(name: string): { name: string; bytes?: number; mtimeMs?: n
 
 function writeTrainLineage(task: TrainTask): void {
   const remote = task.params.mode === 'remote';
+  /* 端点记录「实际打的那个」（任务级参数或全局偏好），续跑/观测面照它定位 server */
+  const remoteEndpoint = remote ? effectiveRemoteEndpoint(task) : null;
   const checkpoints = listTrainCheckpoints(task.outputDir).map((c) => ({
     name: c.name,
     path: join(task.outputDir, c.name),
@@ -1814,7 +1843,15 @@ function writeTrainLineage(task: TrainTask): void {
     ...(task.parentTaskId ? { parentTaskId: task.parentTaskId } : {}),
     ...(versions.swift ? { swiftVersion: versions.swift } : {}),
     ...(versions.twinkle ? { twinkleVersion: versions.twinkle } : {}),
-    ...(remote ? { remote: { serverBaseUrl: String(task.params.server_base_url ?? '') } } : {}),
+    ...(remote
+      ? {
+          remote: {
+            serverBaseUrl: remoteEndpoint?.baseUrl ?? '',
+            /* server 侧 run id（driver 日志回显解析）：ckpt 枚举/续跑定位用 */
+            ...(task.remoteRunId ? { runId: task.remoteRunId } : {}),
+          },
+        }
+      : {}),
     checkpoints,
     updatedAt: new Date().toISOString().slice(0, 19).replace('T', ' '),
   };
@@ -1846,6 +1883,99 @@ const TRAIN_OWNED_KEYS = new Set([
   'model', 'dataset', 'val_dataset', 'tuner', 'external_plugins', 'nproc_per_node', 'output_dir',
 ]);
 
+/* ------------------------------------------------------------------ */
+/* remote（twinkle-server）端点解析与 server API 转发                     */
+/* ------------------------------------------------------------------ */
+
+/** 全局端点偏好：与 pythonPath 同一份 ~/.swift/webui-settings.json，spawn 时现读 */
+function remoteEndpointPref(): { baseUrl: string; apiKey: string } {
+  const saved = loadWebuiSettings();
+  return { baseUrl: String(saved.serverBaseUrl ?? '').trim(), apiKey: String(saved.serverApiKey ?? '').trim() };
+}
+
+/** 任务的有效 remote 端点：任务级 server_* 参数覆盖、全局偏好兜底；非 remote 或没配返回 null */
+function effectiveRemoteEndpoint(
+  task: { params: Record<string, string | number | boolean> },
+): { baseUrl: string; apiKey: string } | null {
+  if (task.params.mode !== 'remote') return null;
+  const pref = remoteEndpointPref();
+  /* 尾斜杠在源头剥掉：argv 注入（twinkle_client 不剥，会拼出 //api/v1）、lineage 与 fetch 共用这同一值 */
+  const baseUrl = (String(task.params.server_base_url ?? '').trim() || pref.baseUrl).replace(/\/+$/, '');
+  const apiKey = String(task.params.server_api_key ?? '').trim() || pref.apiKey;
+  return baseUrl ? { baseUrl, apiKey } : null;
+}
+
+/** remote 端点的 spawn argv：端点没配则不注入——CLI validate 响亮报缺 url（日志面可见） */
+function remoteEndpointArgs(task: { params: Record<string, string | number | boolean> }): string[] {
+  const endpoint = effectiveRemoteEndpoint(task);
+  if (!endpoint) return [];
+  return ['--server_base_url', endpoint.baseUrl, ...(endpoint.apiKey ? ['--server_api_key', endpoint.apiKey] : [])];
+}
+
+/*
+ * twinkle-server 网关根的归一：与 twinkle_client 同一条规则（base 不以 /api/v1
+ * 结尾则补上）——偏好里填网关根或带前缀都行；先剥尾斜杠，否则
+ * 「.../api/v1/」会误判再补一段。gateway 的 /twinkle/* 观测 API 与
+ * /model/{id}/twinkle/* 训练 API 都挂在这个前缀下。
+ */
+function twinkleApiBase(baseUrl: string): string {
+  const base = baseUrl.replace(/\/+$/, '');
+  return base.endsWith('/api/v1') ? base : `${base}/api/v1`;
+}
+
+/** 带端点鉴权的 server API 调用；非 2xx 把状态码与响应体贴进异常（日志面可见） */
+async function twinkleServerFetch(
+  endpoint: { baseUrl: string; apiKey: string },
+  path: string,
+  init: RequestInit = {},
+): Promise<Record<string, unknown>> {
+  const res = await fetch(`${twinkleApiBase(endpoint.baseUrl)}${path}`, {
+    ...init,
+    headers: {
+      ...(endpoint.apiKey ? { Authorization: `Bearer ${endpoint.apiKey}` } : {}),
+      ...(init.body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+      ...(init.headers as Record<string, string> | undefined),
+    },
+    signal: AbortSignal.timeout(15_000),
+  });
+  if (!res.ok) {
+    const detail = await res.text().catch(() => '');
+    throw new Error(`twinkle-server ${res.status} ${path}: ${detail.slice(0, 300)}`);
+  }
+  return (await res.json().catch(() => ({}))) as Record<string, unknown>;
+}
+
+/** server 侧 checkpoint 列表（新→旧），映射到 webui 列表端的 {name, path, mtimeMs} 形态 */
+async function serverTrainingCheckpoints(
+  endpoint: { baseUrl: string; apiKey: string },
+  runId: string,
+): Promise<Array<{ name: string; path: string; mtimeMs: number }>> {
+  const data = await twinkleServerFetch(
+    endpoint, `/twinkle/training_runs/${encodeURIComponent(runId)}/checkpoints`);
+  const items = Array.isArray(data.checkpoints) ? (data.checkpoints as Array<Record<string, unknown>>) : [];
+  return items
+    .map((c) => ({
+      name: String(c.checkpoint_id ?? ''),
+      path: String(c.twinkle_path ?? `twinkle://${runId}/${c.checkpoint_id ?? ''}`),
+      mtimeMs: Date.parse(String(c.time ?? '')) || 0,
+    }))
+    .filter((c) => c.name)
+    .sort((a, b) => b.mtimeMs - a.mtimeMs);
+}
+
+/** server 侧训练的显式停止（token 鉴权 + training id，不需要 driver 的 session） */
+async function serverStopTraining(
+  endpoint: { baseUrl: string; apiKey: string },
+  model: string,
+  runId: string,
+): Promise<void> {
+  await twinkleServerFetch(
+    endpoint, `/model/${encodeURIComponent(model)}/twinkle/stop_training`, {
+      method: 'POST',
+      body: JSON.stringify({ training_id: runId, adapter_name: 'default' }),
+    });
+}
+
 /** 把任务字段拼成完整 spawn 参数；trainArgs 是 args 的唯一来源（创建时调用一次） */
 function buildTrainArgs(task: Omit<TrainTask, 'args' | 'status' | 'startedAt' | 'log' | 'metrics'>): string[] {
   const nproc = task.gpus?.length ?? task.gpuCount ?? 0;
@@ -1863,13 +1993,14 @@ function buildTrainArgs(task: Omit<TrainTask, 'args' | 'status' | 'startedAt' | 
      * 多个教师以空格 join 进一个 string）——拆成多个 argv 交给 HfArgumentParser
      * 的 nargs 解析；标量 flag 的值本来就不该含空格，含了也是错的。
      *
-     * 运行位置字段只对各自 mode 有意义（server_* 服务 remote、ray_exp_name
-     * 服务 ray）：params 里残留的异 mode 值（如本地模式下写过的 server
-     * 地址）照拼会产出 CLI 容忍但误导排查的脏 flag。与页面字段展示条件同源。
+     * remote 端点走专用注入位（任务级参数优先、全局偏好兜底，见 remoteEndpointArgs）；
+     * 运行位置字段只对各自 mode 有意义（ray_exp_name 服务 ray）：params 里残留的
+     * 异 mode 值照拼会产出 CLI 容忍但误导排查的脏 flag。与页面字段展示条件同源。
      */
+    ...remoteEndpointArgs(task),
     ...Object.entries(task.params).flatMap(([k, v]) => {
       if (v === '' || v === false) return [];
-      if ((k === 'server_base_url' || k === 'server_api_key') && task.params.mode !== 'remote') return [];
+      if (k === 'server_base_url' || k === 'server_api_key') return [];
       if (k === 'ray_exp_name' && task.params.mode !== 'ray') return [];
       const parts = String(v).split(/\s+/).filter(Boolean);
       return ['--' + k, ...parts];
@@ -3125,6 +3256,22 @@ async function adoptOrphanTrainTasks(): Promise<void> {
     if (dsIdx >= 0) {
       for (let i = dsIdx + 1; i < argv.length && !argv[i].startsWith('--'); i++) datasets.push(argv[i]);
     }
+    /*
+     * remote 形态收编：argv 里的 --mode/--server_base_url/--server_api_key 还原进
+     * params（ckpt 转发/停止/端点解析都读它们，不依赖全局偏好仍在）；run id 从
+     * 已落盘日志行扫回（driver 早已回显过）。
+     */
+    const params: Record<string, string | number | boolean> = {};
+    const mode = pick('--mode');
+    if (mode) params.mode = mode;
+    const baseUrl = pick('--server_base_url');
+    if (baseUrl) params.server_base_url = baseUrl;
+    const apiKey = pick('--server_api_key');
+    if (apiKey) params.server_api_key = apiKey;
+    const log = [
+      ...readTaskLogTail(dirname(outputDir)),
+      '[webui] 训练进程在 webui 重启后仍在运行，已重新纳入管理（参数从其命令行还原）',
+    ];
     const task: TrainTask = {
       id,
       taskType,
@@ -3132,20 +3279,21 @@ async function adoptOrphanTrainTasks(): Promise<void> {
       datasets: datasets.length ? datasets : ['(未知)'],
       tuner: (pick('--tuner') as TrainTask['tuner']) ?? 'lora',
       plugins: [],
-      params: {},
+      params,
       outputDir,
       /* 展示用：收编任务按真实命令行重建（与 spawn 时 argv 同构，去掉解释器） */
       args: argv.slice(1),
       status: 'running',
       startedAt: 'webui 重启前',
       /* 日志从落盘的 output.log 尾部恢复（指标由 metrics.jsonl 同步恢复） */
-      log: [
-        ...readTaskLogTail(dirname(outputDir)),
-        '[webui] 训练进程在 webui 重启后仍在运行，已重新纳入管理（参数从其命令行还原）',
-      ],
+      log,
       metrics: [],
       pid,
     };
+    if (params.mode === 'remote') {
+      const rid = log.map(remoteRunIdFromLine).find(Boolean);
+      if (rid) task.remoteRunId = rid;
+    }
     trainTasks.set(id, task);
   }
 }
@@ -5479,23 +5627,57 @@ function swiftApiPlugin(): Plugin {
               res.end(JSON.stringify({ error: 'unknown train task' }));
               return;
             }
+            const remote = task.params.mode === 'remote';
+            /* 远端形态：ckpt 在 server 侧 store（twinkle:// URI），本地 output 不可枚举——
+             * 转发 server 的 training_runs API（run id 由 driver 日志回显解析）。 */
+            if (remote) {
+              const endpoint = effectiveRemoteEndpoint(task);
+              if (!endpoint) {
+                res.statusCode = 409;
+                res.setHeader('Content-Type', 'application/json');
+                res.end(JSON.stringify({ error: 'remote 训练未配置 server 端点（任务级参数或全局偏好）' }));
+                return;
+              }
+              if (!task.remoteRunId) {
+                res.setHeader('Content-Type', 'application/json');
+                res.end(
+                  JSON.stringify({
+                    checkpoints: [],
+                    remote: true,
+                    warning:
+                      '远端形态训练：server run id 尚未回显（训练还在启动或 adapter 未创建），checkpoint 在 server 侧不可枚举；稍后重试。',
+                  }),
+                );
+                return;
+              }
+              try {
+                const ckpts = await serverTrainingCheckpoints(endpoint, task.remoteRunId);
+                const latest = ckpts[0];
+                res.setHeader('Content-Type', 'application/json');
+                res.end(
+                  JSON.stringify({
+                    checkpoints: ckpts,
+                    /* 最新断点 + 续跑模板（twinkle:// URI 即 CLI 的 resume 句柄）：agent 与一键续跑共用同一事实源 */
+                    ...(latest ? { resumeFrom: latest.path } : {}),
+                    remote: true,
+                  }),
+                );
+              } catch (e) {
+                /* server 不可达/404：错误体直接给到调用方（UI 态可见），不静默降级空列表 */
+                res.statusCode = 502;
+                res.setHeader('Content-Type', 'application/json');
+                res.end(JSON.stringify({ error: `server 侧 checkpoint 枚举失败: ${String(e)}` }));
+              }
+              return;
+            }
             const ckpts = listTrainCheckpoints(task.outputDir).map((c) => ({ ...c, path: join(task.outputDir, c.name) }));
             const latest = ckpts[0];
-            /* 远端形态：ckpt 在 server 侧，本机 output 下通常为空且不可枚举 */
-            const remote = task.params.mode === 'remote';
             res.setHeader('Content-Type', 'application/json');
             res.end(
               JSON.stringify({
                 checkpoints: ckpts,
                 /* 最新断点 + 续跑模板：agent 与一键续跑共用同一事实源 */
                 ...(latest ? { resumeFrom: latest.path } : {}),
-                ...(remote
-                  ? {
-                      remote: true,
-                      warning:
-                        '远端形态训练：checkpoint 存在 server 侧（本机不可枚举），服务端可能回收旧 checkpoint——续跑前先确认目标仍存在，失败时优先怀疑回收。',
-                    }
-                  : {}),
               }),
             );
             return;
@@ -5515,6 +5697,7 @@ function swiftApiPlugin(): Plugin {
            * 断点清理（POST :id/prune {keep:N}）：只删本任务 output 下的旧
            * checkpoint 目录，保留最新 N 个；lineage 同步重写。磁盘水位的
            * 出口——agent（prune_checkpoints 工具）与人（curl）共用。
+           * remote 形态转发 server 的 delete-checkpoint API（run id 映射同一来源）。
            */
           if (req.method === 'POST' && seg0 && segs[1] === 'prune') {
             const task = trainTasks.get(seg0);
@@ -5525,6 +5708,46 @@ function swiftApiPlugin(): Plugin {
             }
             const body = (await readJsonBody(req)) as { keep?: unknown };
             const keep = Number.isInteger(body.keep) && (body.keep as number) > 0 ? (body.keep as number) : 1;
+            if (task.params.mode === 'remote') {
+              const endpoint = effectiveRemoteEndpoint(task);
+              if (!endpoint || !task.remoteRunId) {
+                res.statusCode = 409;
+                res.setHeader('Content-Type', 'application/json');
+                res.end(
+                  JSON.stringify({
+                    error: !endpoint
+                      ? 'remote 训练未配置 server 端点（任务级参数或全局偏好）'
+                      : 'server run id 尚未回显（训练还在启动或 adapter 未创建），无 checkpoint 可清理',
+                  }),
+                );
+                return;
+              }
+              try {
+                const ckpts = await serverTrainingCheckpoints(endpoint, task.remoteRunId);
+                const victims = ckpts.slice(keep);
+                for (const v of victims) {
+                  await twinkleServerFetch(
+                    endpoint,
+                    `/twinkle/training_runs/${encodeURIComponent(task.remoteRunId)}/checkpoints/${encodeURIComponent(v.name)}`,
+                    { method: 'DELETE' },
+                  );
+                }
+                writeTrainLineage(task);
+                pushTrainLog(
+                  task,
+                  `[webui] 远端清理旧 checkpoint：保留最新 ${keep} 个，删除 ${victims.map((v) => v.name).join('、') || '（无）'}`,
+                );
+                res.setHeader('Content-Type', 'application/json');
+                res.end(
+                  JSON.stringify({ pruned: victims.map((v) => v.name), kept: ckpts.slice(0, keep).map((c) => c.name) }),
+                );
+              } catch (e) {
+                res.statusCode = 502;
+                res.setHeader('Content-Type', 'application/json');
+                res.end(JSON.stringify({ error: `server 侧 checkpoint 清理失败: ${String(e)}` }));
+              }
+              return;
+            }
             const ckpts = listTrainCheckpoints(task.outputDir);
             const victims = ckpts.slice(keep);
             if (!victims.length) {
@@ -5870,6 +6093,31 @@ if (req.method === 'POST' && !seg0) {
                 }
               }
               pushTrainLog(task, '[webui] 用户停止训练');
+              /*
+               * remote 形态：杀本地 driver 只停了请求来源——server 侧的训练（adapter
+               * 槽位/在途排队任务）还活着，必须显式 release。转发 stop_training（token
+               * 鉴权 + run id，不需要 driver 的 session）；失败响亮进日志（不变量：停止
+               * 不得假装完成——server 不可达时日志面必须可见）。driver 被杀后 session
+               * 心跳停摆，server 的过期回收是这条通道不可用时的兜底。
+               */
+              if (task.params.mode === 'remote') {
+                const endpoint = effectiveRemoteEndpoint(task);
+                if (endpoint && task.remoteRunId) {
+                  try {
+                    await serverStopTraining(endpoint, task.model, task.remoteRunId);
+                    pushTrainLog(task, `[webui] server 侧训练已释放：run=${task.remoteRunId}`);
+                  } catch (e) {
+                    pushTrainLog(task, `[webui] server 侧训练释放失败（将依赖会话过期回收）: ${String(e)}`);
+                  }
+                } else {
+                  pushTrainLog(
+                    task,
+                    endpoint
+                      ? '[webui] server 侧训练未释放：run id 尚未回显（训练还在启动期），将依赖会话过期回收'
+                      : '[webui] server 侧训练未释放：未配置 server 端点，将依赖会话过期回收',
+                  );
+                }
+              }
               writeTrainLineage(task);
             }
             res.setHeader('Content-Type', 'application/json');
