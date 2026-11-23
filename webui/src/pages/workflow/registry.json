@@ -4585,6 +4585,23 @@
           "profile_param": ""
         },
         {
+          "key": "scores",
+          "kind": "DATA",
+          "role": "与轨迹逐行对齐的评分事实",
+          "profiles": [
+            "scores"
+          ],
+          "many": false,
+          "optional": false,
+          "accepted_kinds": [],
+          "access": "read",
+          "control": false,
+          "scope": false,
+          "enabled_by": "",
+          "mirror_input": "",
+          "profile_param": ""
+        },
+        {
           "key": "metric",
           "kind": "METRIC",
           "role": "本批评分摘要",
@@ -5005,6 +5022,23 @@
           "enabled_by": "",
           "mirror_input": "",
           "profile_param": ""
+        },
+        {
+          "key": "scores",
+          "kind": "DATA",
+          "role": "显式评分事实；旧图由数据组件提取",
+          "profiles": [
+            "scores"
+          ],
+          "many": false,
+          "optional": true,
+          "accepted_kinds": [],
+          "access": "read",
+          "control": false,
+          "scope": false,
+          "enabled_by": "",
+          "mirror_input": "",
+          "profile_param": ""
         }
       ],
       "ports_out": [
@@ -5126,95 +5160,6 @@
       "execution": "remote",
       "surface": "algorithm"
     },
-    "signal_combine": {
-      "type": "signal_combine",
-      "label": "数值组合",
-      "lifecycle": "Stage",
-      "math_doc": "对齐通道的加权平均（权重为混合系数，同比缩放结果不变）或概率混合；logps 概率混合使用 logsumexp。",
-      "ports_in": [
-        {
-          "key": "signals",
-          "kind": "MODEL_OUTPUT",
-          "role": "具名对齐数值",
-          "profiles": [],
-          "many": true,
-          "optional": false,
-          "accepted_kinds": [],
-          "access": "read",
-          "control": false,
-          "scope": false,
-          "enabled_by": "",
-          "mirror_input": "",
-          "profile_param": ""
-        }
-      ],
-      "ports_out": [
-        {
-          "key": "out",
-          "kind": "MODEL_OUTPUT",
-          "role": "与输入数学类型一致",
-          "profiles": [],
-          "many": false,
-          "optional": false,
-          "accepted_kinds": [],
-          "access": "read",
-          "control": false,
-          "scope": false,
-          "enabled_by": "",
-          "mirror_input": "signals",
-          "profile_param": ""
-        }
-      ],
-      "params": [
-        {
-          "name": "mode",
-          "label": "运算",
-          "default": "weighted_sum",
-          "doc": "",
-          "options": [
-            "weighted_sum",
-            "probability_mixture"
-          ],
-          "group": "",
-          "type": "str",
-          "required": false,
-          "nullable": false,
-          "minimum": null,
-          "maximum": null,
-          "phase": "call",
-          "secret": false,
-          "item_type": "",
-          "item_options": [],
-          "unique_items": false
-        },
-        {
-          "name": "weights",
-          "label": "逐 slot 权重",
-          "default": {},
-          "doc": "",
-          "options": [],
-          "group": "",
-          "type": "dict",
-          "required": false,
-          "nullable": false,
-          "minimum": null,
-          "maximum": null,
-          "phase": "call",
-          "secret": false,
-          "item_type": "",
-          "item_options": [],
-          "unique_items": false
-        }
-      ],
-      "factory": "",
-      "client_factory": "",
-      "effects": [],
-      "exclusive_inputs": [],
-      "required_when": [],
-      "owner_kind": "",
-      "execution": "remote",
-      "surface": "algorithm"
-    },
     "select": {
       "type": "select",
       "label": "样本筛选",
@@ -5247,6 +5192,26 @@
           "many": true,
           "optional": true,
           "accepted_kinds": [],
+          "access": "read",
+          "control": false,
+          "scope": false,
+          "enabled_by": "",
+          "mirror_input": "",
+          "profile_param": ""
+        },
+        {
+          "key": "scores",
+          "kind": "DATA",
+          "role": "与原始轨迹对齐的评分事实",
+          "profiles": [
+            "scores"
+          ],
+          "many": false,
+          "optional": true,
+          "accepted_kinds": [
+            "DATA",
+            "BATCH"
+          ],
           "access": "read",
           "control": false,
           "scope": false,
@@ -5301,6 +5266,23 @@
           "scope": false,
           "enabled_by": "",
           "mirror_input": "",
+          "profile_param": ""
+        },
+        {
+          "key": "scores",
+          "kind": "DATA",
+          "role": "同一次选择后的评分事实",
+          "profiles": [
+            "scores"
+          ],
+          "many": false,
+          "optional": false,
+          "accepted_kinds": [],
+          "access": "read",
+          "control": false,
+          "scope": false,
+          "enabled_by": "",
+          "mirror_input": "batch",
           "profile_param": ""
         }
       ],
