@@ -268,8 +268,8 @@ export interface GraphEdge {
   toPort: string;
   /**
    * 多输入口（many）的槽位名。v3 协议里 many 口的每条边都带 slot，
-   * slot 就是消费端参数的真实名字（如 train_step.arguments 的 loss 参数名、
-   * signal_combine.signals 的具名权重）——它不是装饰：后端按 (slot, value)
+   * slot 就是消费端参数的真实名字（如 train_step.arguments 的 loss 参数名）
+   * ——它不是装饰：后端按 (slot, value)
    * 配对消费，缺 slot 的 many 边在执行期无名义可落。
    */
   slot?: string;

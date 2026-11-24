@@ -173,10 +173,6 @@ const UI_EXTRAS: Record<string, UiExtras> = {
     category: 'wf.catRewardAdv', labelKey: 'wf.nodeAdvantage', color: COLORS.adv, icon: <TrendingUp />, runnable: true,
     hint: 'wf.hintAdvantage',
   },
-  signal_combine: {
-    category: 'wf.catRewardAdv', color: COLORS.adv, icon: <GitMerge />,
-    hint: 'wf.hintSignalCombine',
-  },
   select: {
     category: 'wf.catRewardAdv', labelKey: 'wf.nodeTrajFilter', color: COLORS.adv, icon: <Filter />, runnable: true,
     hint: 'wf.hintTrajFilter',

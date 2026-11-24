@@ -352,24 +352,19 @@ const RFT: Preset = {
   }],
 };
 
-/**
- * OPD-MT（多教师蒸馏）：两路 teacher 前向各出一路 logps（单一 out 口），
- * signal_combine 以概率混合（logsumexp_k(log w_k + logp_k)）把 K 路融成单一
- * 教师目标——多教师融合是一个显式的通用数学组件，不是损失的隐藏分支；
- * 混合结果接 train_step 的 teacher 口（教师信号不再是 loss 形参连线）。
- */
-const OPD_MT: Preset = {
-  key: 'opd_mt',
-  label: 'wf.presetOpdMt',
-  desc: 'wf.presetOpdMtDesc',
+/** OPSD（单教师在线蒸馏）：一路冻结教师前向出 logps，直进 train_step 的 teacher 口，
+ * GKD logits 契约由 loss 参数选择。多教师混合（signal_combine）已随后端退役删除，
+ * 教师信号不再是 loss 形参连线。teacher 口必须实接：opsd 损失在 teacher=None 时
+ * 静默返回 0，整轮训练空转。 */
+const OPSD: Preset = {
+  key: 'opsd',
+  label: 'wf.presetOpsd',
+  desc: 'wf.presetOpsdDesc',
   nodes: [
     N('o_data', 'dataset', X[0], 0, [P('dataset', DATASET)]),
     N('o_loader', 'dataloader', X[0], 260, [P('batch_size', '4')]),
     N('o_gen', 'generate', X[1], 0, [P('num_generations', '4'), P('generation_config', GEN_ARGS)]),
-    /* 两路教师前向同列上下叠：gen 到两路的 traj 边都是相邻列，不穿卡 */
     N('o_tsig1', 'model_forward', X[2], -280, [P('tokenizer', TOKENIZER), P('template_config', TEMPLATE), P('outputs', '["logps"]')]),
-    N('o_tsig2', 'model_forward', X[2], -560, [P('tokenizer', TOKENIZER), P('template_config', TEMPLATE), P('outputs', '["logps"]')]),
-    N('o_mix', 'signal_combine', X[3], -280, [P('mode', 'probability_mixture')]),
     N('o_train', 'train_step', X[4], 0, [P('tokenizer', TOKENIZER), P('template_config', TEMPLATE), P('lr', '1e-4'), P('gradient_accumulation_steps', '1'), P('micro_batch_size', '4')], { then: 'left' }),
     N('o_ckpt', 'checkpoint', X[5], 0, [P('profile', 'model')]),
     N('o_merge', 'merge', X[6], 0, [P('merge_config', '{"adapters": ["output/checkpoint-final"]}')]),
@@ -377,7 +372,6 @@ const OPD_MT: Preset = {
     N('o_sampler', 'sampler', 0, Y[0], [P('model', TOKENIZER), P('engine', 'vllm'), P('engine_args', ENGINE_ARGS), P('template_config', TEMPLATE)]),
     /* 冻结教师放左上：model 边沿顶部空带水平进前向卡，不穿主链 */
     N('o_teach1', 'model', -262, -280, [P('model', TOKENIZER), P('freeze', 'true')]),
-    N('o_teach2', 'model', -262, -620, [P('model', TOKENIZER), P('freeze', 'true')]),
     N('o_policy', 'model', 0, Y[1], [P('model', TOKENIZER), P('train_type', 'lora')]),
   ],
   edges: [
@@ -386,44 +380,20 @@ const OPD_MT: Preset = {
     E('o_sampler', 'sampler', 'o_gen', 'engine'),
     E('o_gen', 'traj', 'o_tsig1', 'traj'),
     E('o_teach1', 'model', 'o_tsig1', 'model'),
-    E('o_tsig1', 'out', 'o_mix', 'signals', 'teacher_1'),
-    E('o_gen', 'traj', 'o_tsig2', 'traj'),
-    E('o_teach2', 'model', 'o_tsig2', 'model'),
-    E('o_tsig2', 'out', 'o_mix', 'signals', 'teacher_2'),
-    E('o_mix', 'out', 'o_train', 'teacher'),
+    E('o_tsig1', 'out', 'o_train', 'teacher'),
     E('o_gen', 'traj', 'o_train', 'batch'),
     E('o_loss', 'loss', 'o_train', 'loss'),
     E('o_policy', 'model', 'o_train', 'model'),
     E('o_train', 'step', 'o_ckpt', 'step'),
     E('o_train', 'model', 'o_ckpt', 'model'),
     E('o_ckpt', 'artifact', 'o_merge', 'artifact'),
-    /* 回环闭合：每批训完放行下一批（feedback 边；OPSD 派生时随 edges 继承） */
+    /* 回环闭合：每批训完放行下一批（feedback 边） */
     E('o_train', 'then', 'o_loader', 'after'),
   ],
   frames: [{
-    id: 'o_loop', label: 'wf.frameTrainLoop', note: 'wf.noteOpdMt',
+    id: 'o_loop', label: 'wf.frameTrainLoop', note: 'wf.noteOpsd',
     x: 222, y: -300, w: 2080, h: 780,
-    memberIds: ['o_loader', 'o_gen', 'o_tsig1', 'o_tsig2', 'o_mix', 'o_train'],
-  }],
-};
-
-/** OPSD：单教师版——一路 teacher logps 直进损失，GKD logits 契约由 loss 参数选择。
- * 派生顺序：先把 o_tsig1→o_mix 的边重接到 o_train.teacher（含 id 更新），再滤掉
- * 第二教师与混合器——先滤后接会把待重接的边先删掉，teacher 口空接，opsd 损失
- * 在 teacher=None 时静默返回 0，整轮训练空转。 */
-const OPSD: Preset = {
-  key: 'opsd',
-  label: 'wf.presetOpsd',
-  desc: 'wf.presetOpsdDesc',
-  nodes: OPD_MT.nodes.filter((n) => n.id !== 'o_teach2' && n.id !== 'o_tsig2' && n.id !== 'o_mix'),
-  edges: OPD_MT.edges
-    .map((e) => (e.from === 'o_tsig1' && e.to === 'o_mix'
-      ? { ...e, id: 'o_tsig1.out-o_train.teacher', to: 'o_train', toPort: 'teacher', slot: undefined } : e))
-    .filter((e) => e.from !== 'o_teach2' && e.from !== 'o_tsig2' && e.from !== 'o_mix'
-      && e.to !== 'o_tsig2' && e.to !== 'o_mix'),
-  frames: [{
-    ...OPD_MT.frames![0],
-    memberIds: (OPD_MT.frames![0].memberIds ?? []).filter((id) => id !== 'o_tsig2' && id !== 'o_mix'),
+    memberIds: ['o_loader', 'o_gen', 'o_tsig1', 'o_train'],
   }],
 };
 
@@ -695,7 +665,7 @@ export const clonePreset = (p: Preset): Preset => ({
 });
 
 export const PRESETS: Preset[] = [
-  GRPO, GRPO_FULL, GRPO_COLOCATE, PPO, RFT, OPD_MT, OPSD, SFT, SFT_FULL, DPO, RSI, TCPO, PSC,
+  GRPO, GRPO_FULL, GRPO_COLOCATE, PPO, RFT, OPSD, SFT, SFT_FULL, DPO, RSI, TCPO, PSC,
 ];
 
 export const DEFAULT_PRESET = GRPO;
