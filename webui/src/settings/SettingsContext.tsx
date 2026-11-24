@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { PRESET_SYSTEM_PROMPTS, type SystemPromptsState } from '@/store/systemPrompts';
+import { defaultColorSchemes, normalizeColorSchemes, type ColorSchemes } from '@/theme/palettes';
 
 /**
  * 全局偏好设置。
@@ -39,6 +40,8 @@ export interface Settings {
   locale: UiLocale;
   /** 界面主题：浅色 / 深色 / 跟随系统（缺省跟随系统） */
   theme: UiTheme;
+  /** 浅色／深色独立配色；只保存预设和用户的颜色覆盖 */
+  colorSchemes: ColorSchemes;
   /** tips 轮换间隔（秒） */
   tipsInterval: number;
   /** tips 只显示自己看得懂的：关掉后不出现涉及具体算法细节的条目 */
@@ -85,6 +88,7 @@ const DEFAULTS: Settings = {
   tipsBeginnerOnly: false,
   locale: 'zh',
   theme: 'system',
+  colorSchemes: defaultColorSchemes(),
   aiEnabled: true,
   aiConfirmBeforeApply: true,
   aiModel: '',
@@ -122,13 +126,14 @@ function mergeSaved(saved: unknown): Settings {
   const msToken = typeof s.msToken === 'string' ? s.msToken : '';
   const serverBaseUrl = typeof s.serverBaseUrl === 'string' ? s.serverBaseUrl : null;
   const serverApiKey = typeof s.serverApiKey === 'string' ? s.serverApiKey : null;
-  return { ...DEFAULTS, ...s, locale, theme, msToken, serverBaseUrl, serverApiKey, chatDefaults, systemPrompts };
+  const colorSchemes = normalizeColorSchemes(s.colorSchemes);
+  return { ...DEFAULTS, ...s, locale, theme, colorSchemes, msToken, serverBaseUrl, serverApiKey, chatDefaults, systemPrompts };
 }
 
 interface SettingsCtx {
   settings: Settings;
-  /** 改一个字段（嵌套字段传整个子对象） */
-  update: <K extends keyof Settings>(key: K, value: Settings[K]) => void;
+  /** 改一个字段；嵌套更新可由函数接收最新子对象，避免连续操作互相覆盖 */
+  update: <K extends keyof Settings>(key: K, value: Settings[K] | ((previous: Settings[K]) => Settings[K])) => void;
   /** 恢复默认（含提示词库回预设） */
   reset: () => void;
   /** 服务端设置是否已加载完成（ChatPage 用它做一次性的默认值同步） */
@@ -234,12 +239,12 @@ export function SettingsProvider({ children }: { children: React.ReactNode }) {
   }, [settings, loaded, mode]);
 
   const update = useCallback(
-    <K extends keyof Settings>(key: K, value: Settings[K]) =>
-      setSettings((s) => ({ ...s, [key]: value })),
+    <K extends keyof Settings>(key: K, value: Settings[K] | ((previous: Settings[K]) => Settings[K])) =>
+      setSettings((s) => ({ ...s, [key]: typeof value === 'function' ? value(s[key]) : value })),
     [],
   );
 
-  const reset = useCallback(() => setSettings(DEFAULTS), []);
+  const reset = useCallback(() => setSettings({ ...DEFAULTS, colorSchemes: defaultColorSchemes() }), []);
   const dismissTips = useCallback(() => setTipsDismissed(true), []);
 
   const value = useMemo(

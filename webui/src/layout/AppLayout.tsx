@@ -1,14 +1,15 @@
-import { useEffect, useState } from 'react';
+import { useLayoutEffect, useState } from 'react';
 import { Outlet } from 'react-router-dom';
 import { Sidebar } from './Sidebar';
 import { Titlebar } from './Titlebar';
 import { TipsBar } from './TipsBar';
 import { CONTENT_H_VAR, contentHeightValue } from './metrics';
 import { useSettings } from '@/settings/SettingsContext';
+import { DECORATIVE_TOKENS, resolvePalette, type Palette } from '@/theme/palettes';
 
 /**
- * 应用外壳：标题栏（深）+ 侧栏（深）+ 内容区（浅）+ 底部 tips 条（深）。
- * 深外壳夹浅工作区是 IDE 的常见做法，也是这套界面「工具感」的主要来源。
+ * 应用外壳：标题栏、侧栏、内容区与底部 tips 条共用当前模式的装饰配色。
+ * workflow 深色画布保持独立，不随外壳配色改变。
  *
  * 原来外面还套了一层深色桌面、窗口带圆角和大阴影，现在去掉了，
  * 理由写在 metrics.ts 的 WINDOW_PAD 上。
@@ -17,21 +18,40 @@ export function AppLayout() {
   const [collapsed, setCollapsed] = useState(false);
   const { settings, tipsDismissed } = useSettings();
 
-  /* 主题接线：.dark 挂在 <html> 上（index.css 的 @custom-variant 与 .dark 变量块
-   * 都读它）。system 态订阅 prefers-color-scheme，系统切换实时生效 */
-  useEffect(() => {
+  /* 明暗类与装饰变量在绘制前一起应用；system 监听随最新配色更新。 */
+  useLayoutEffect(() => {
     const root = document.documentElement;
-    const apply = (dark: boolean) => root.classList.toggle('dark', dark);
-    if (settings.theme !== 'system') {
-      apply(settings.theme === 'dark');
-      return;
-    }
-    const mq = window.matchMedia('(prefers-color-scheme: dark)');
-    apply(mq.matches);
+    const originalDark = root.classList.contains('dark');
+    const original = DECORATIVE_TOKENS.map((token) => ({
+      token,
+      value: root.style.getPropertyValue(`--${token}`),
+      priority: root.style.getPropertyPriority(`--${token}`),
+    }));
+    let appliedDark = originalDark;
+    let applied: Palette;
+    const apply = (dark: boolean) => {
+      appliedDark = dark;
+      root.classList.toggle('dark', dark);
+      const mode = dark ? 'dark' : 'light';
+      applied = resolvePalette(mode, settings.colorSchemes[mode]);
+      for (const token of DECORATIVE_TOKENS) root.style.setProperty(`--${token}`, applied[token]);
+    };
+    const mq = settings.theme === 'system' ? window.matchMedia('(prefers-color-scheme: dark)') : null;
+    apply(mq ? mq.matches : settings.theme === 'dark');
     const onChange = (e: MediaQueryListEvent) => apply(e.matches);
-    mq.addEventListener('change', onChange);
-    return () => mq.removeEventListener('change', onChange);
-  }, [settings.theme]);
+    mq?.addEventListener('change', onChange);
+    return () => {
+      mq?.removeEventListener('change', onChange);
+      /* 只恢复仍属于本功能的写入，保留其他代码后来修改的属性。 */
+      for (const { token, value, priority } of original) {
+        if (root.style.getPropertyValue(`--${token}`) !== applied[token]
+          || root.style.getPropertyPriority(`--${token}`) !== '') continue;
+        if (value) root.style.setProperty(`--${token}`, value, priority);
+        else root.style.removeProperty(`--${token}`);
+      }
+      if (root.classList.contains('dark') === appliedDark) root.classList.toggle('dark', originalDark);
+    };
+  }, [settings.theme, settings.colorSchemes]);
 
   const tipsVisible = settings.tipsEnabled && !tipsDismissed;
 

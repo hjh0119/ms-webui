@@ -16,6 +16,7 @@ import { LOCALES, useT } from '@/i18n';
 import { clearSearchKey, getSearchConfig, saveSearchKey } from '@/api/search';
 import { addDataRoot, listDataRoots, removeDataRoot } from '@/api/dataRoots';
 import { newPromptId, PRESET_SYSTEM_PROMPTS, type SystemPromptsState } from '@/store/systemPrompts';
+import { ColorSchemeEditor } from './ColorSchemeEditor';
 
 /**
  * 偏好设置。
@@ -181,6 +182,8 @@ export function SettingsPage() {
               ]}
             />
           </Row>
+          <ColorSchemeEditor mode="light" />
+          <ColorSchemeEditor mode="dark" />
         </Group>
       
         <Group icon={<Lightbulb size={13} />} title={t('settings.tips')} desc={t('settings.tipsDesc')}>

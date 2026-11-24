@@ -85,6 +85,15 @@ npm run dev
 - **Models, plugins, skills**: model endpoints (API services or local
   deployments) are configured in the models page; plugins and skills extend
   what the agent can do.
+- **Appearance**: Settings offers independent light and dark color schemes
+  (ice blue, warm paper, teal, violet and rose). Customize the primary and
+  background colors with a color picker or #RGB / #RRGGBB input; text and
+  surface colors are matched automatically. Enter or leaving the field commits
+  a valid HEX value; Escape cancels the draft. Choosing a preset clears that
+  group's custom colors without switching appearance mode. Preferences use
+  the host settings file (~/.swift/webui-settings.json); expo mode keeps them
+  only in the browser session. Task status colors and the dark workflow canvas
+  remain unchanged.
 
 ## Skills
 
