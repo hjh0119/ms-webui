@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { memo, useEffect, useRef } from 'react';
 import { contentHeight } from '@/layout/metrics';
 
 /**
@@ -27,38 +27,33 @@ export function LogViewer({
     }
   }, [lines, follow]);
 
-  /**
-   * 判定顺序有讲究：ERROR 要先于 WARN，否则 "WARN: ... ERROR" 这类行会被判成警告。
-   * 时间戳行放最后，因为它只是想把噪音压灰，不该盖掉前面几类。
-   */
-  const colorOf = (line: string) => {
-    /* [workflow] 边界行：编排执行的节段标记（编译结果、节点完成、recipe 分派），
-     * 用 accent 色突出方便扫「跑到哪了」——它是线性日志里唯一的结构性信息 */
-    if (line.startsWith('[workflow]')) return 'var(--chart-2)';
-    if (/\b(ERROR|Traceback|CUDA out of memory|FAILED)\b/.test(line) || line.includes('运行失败')) {
-      return 'var(--state-failed)';
-    }
-    if (/\bWARN(ING)?\b/.test(line)) return 'var(--state-paused)';
-    /* 整行 JSON 一般是 metrics 落盘，跟正文区分开好扫 */
-    if (line.startsWith('{')) return 'var(--chart-3)';
-    if (/^\[\d{4}-/.test(line) || line.includes('run.sh')) return 'var(--muted-foreground)';
-    return 'var(--foreground)';
-  };
-
   return (
     <div
       ref={boxRef}
       className="bg-muted border-border overflow-auto border py-3 font-mono text-[12.5px] leading-5"
       style={{ height }}
     >
-      {lines.map((line, i) => (
-        <div key={i} className="flex px-3.5 whitespace-pre-wrap break-all">
-          <span className="text-muted-foreground/45 w-10 flex-none pr-3.5 text-right select-none tabular">
-            {i + 1}
-          </span>
-          <span style={{ color: colorOf(line) }}>{line}</span>
-        </div>
-      ))}
+      {lines.map((line, i) => <LogLine key={i} line={line} number={i + 1} />)}
     </div>
   );
+}
+
+// 追加日志不重新着色历史行；主题仍由 CSS 变量实时切换。
+const LogLine = memo(function LogLine({ line, number }: { line: string; number: number }) {
+  return (
+    <div className="flex px-3.5 whitespace-pre-wrap break-all">
+      <span className="text-muted-foreground/60 w-10 flex-none pr-3.5 text-right select-none tabular">{number}</span>
+      <span style={{ color: colorOf(line) }}>{line}</span>
+    </div>
+  );
+});
+
+/** ERROR 先于 WARN，时间戳最后判断；workflow 节段仍优先突出。 */
+function colorOf(line: string): string {
+  if (line.startsWith('[workflow]')) return 'var(--chart-2)';
+  if (/\b(ERROR|Traceback|CUDA out of memory|FAILED)\b/.test(line) || line.includes('运行失败')) return 'var(--state-failed)';
+  if (/\bWARN(ING)?\b/.test(line)) return 'var(--state-paused)';
+  if (line.startsWith('{')) return 'var(--chart-3)';
+  if (/^\[\d{4}-/.test(line) || line.includes('run.sh')) return 'var(--muted-foreground)';
+  return 'var(--foreground)';
 }

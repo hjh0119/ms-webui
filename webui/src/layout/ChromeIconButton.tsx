@@ -30,8 +30,8 @@ export function ChromeIconButton({
   className?: string;
 }) {
   const shared = cn(
-    'inline-flex shrink-0 items-center justify-center transition-colors',
-    'text-sidebar-foreground/45 hover:bg-sidebar-accent hover:text-sidebar-foreground',
+    'ui-chrome-button inline-flex shrink-0 items-center justify-center rounded-md transition-colors duration-[140ms]',
+    'text-sidebar-foreground/65 hover:bg-sidebar-accent hover:text-sidebar-foreground',
     'focus-visible:ring-sidebar-ring cursor-pointer focus-visible:ring-2 focus-visible:outline-none',
     className,
   );

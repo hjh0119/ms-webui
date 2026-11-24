@@ -269,8 +269,8 @@ export function TaskListPage({
                 onClick={() => setStatus(f.value)}
                 className={
                   active
-                    ? 'bg-secondary text-foreground inline-flex h-7 cursor-pointer items-center gap-1.5 px-2.5 text-[13px] font-medium'
-                    : 'text-muted-foreground hover:text-foreground hover:bg-secondary/60 inline-flex h-7 cursor-pointer items-center gap-1.5 px-2.5 text-[13px]'
+                    ? 'bg-secondary text-foreground inline-flex h-7 cursor-pointer items-center gap-1.5 rounded-md px-2.5 text-[13px] transition-colors duration-[140ms] font-medium'
+                    : 'text-muted-foreground hover:text-foreground hover:bg-secondary/60 inline-flex h-7 cursor-pointer items-center gap-1.5 rounded-md px-2.5 text-[13px] transition-colors duration-[140ms]'
                 }
               >
                 {tr(f.label)}
@@ -290,7 +290,7 @@ export function TaskListPage({
             {filtered.map((t) => (
               <div
                 key={t.id}
-                className="task-row hover:bg-secondary/50 -mx-3 flex cursor-pointer items-start gap-3.5 px-3 py-3.5 transition-colors"
+                className="task-row hover:bg-secondary/60 -mx-3 flex cursor-pointer items-start gap-3.5 rounded-lg px-3 py-3.5 transition-colors duration-[140ms]"
                 onClick={() => navigate(taskDetailPath(t))}
               >
                 {/* 对比多选 checkbox（仅 showCompare 开启）：点击不触发行跳转 */}

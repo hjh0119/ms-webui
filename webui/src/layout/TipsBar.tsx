@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ExternalLink, Lightbulb, RotateCw, X } from 'lucide-react';
 import { visibleTips } from '@/config/tips';
 import { useSettings } from '@/settings/SettingsContext';
@@ -35,19 +35,33 @@ export function TipsBar() {
   /* 切换时先淡出再换字，避免文字直接跳变 */
   const [visible, setVisible] = useState(true);
 
-  const next = () => {
+  const transitionTimer = useRef<number | null>(null);
+  const clearTransition = useCallback(() => {
+    if (transitionTimer.current !== null) {
+      window.clearTimeout(transitionTimer.current);
+      transitionTimer.current = null;
+    }
+  }, []);
+  const next = useCallback(() => {
+    clearTransition();
     setVisible(false);
-    window.setTimeout(() => {
+    transitionTimer.current = window.setTimeout(() => {
+      transitionTimer.current = null;
       setIdx((i) => (i + 1) % Math.max(1, pool.length));
       setVisible(true);
     }, 220);
-  };
+  }, [clearTransition, pool.length]);
 
   useEffect(() => {
+    // 提示池或轮换间隔改变时，取消旧回调并恢复可见，卸载也不留下回调。
+    setVisible(true);
     const ms = Math.max(4, settings.tipsInterval) * 1000;
     const timer = window.setInterval(next, ms);
-    return () => window.clearInterval(timer);
-  }, [settings.tipsInterval, pool.length]);
+    return () => {
+      window.clearInterval(timer);
+      clearTransition();
+    };
+  }, [settings.tipsInterval, next, clearTransition]);
 
   /* 池子变小后当前下标可能越界；文案按语种取，en 缺翻回落中文 */
   const tip = pool[idx % Math.max(1, pool.length)];
@@ -61,7 +75,7 @@ export function TipsBar() {
     >
       <Lightbulb size={11} className="text-titlebar-accent shrink-0" />
       <div
-        className="flex min-w-0 flex-1 items-center gap-1 transition-[opacity,transform] duration-200"
+        className="ui-tips-transition flex min-w-0 flex-1 items-center gap-1 transition-[opacity,transform] duration-200"
         style={{
           opacity: visible ? 1 : 0,
           transform: visible ? 'translateY(0)' : 'translateY(3px)',

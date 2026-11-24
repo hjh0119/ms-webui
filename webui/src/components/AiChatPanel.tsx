@@ -1,4 +1,4 @@
-import { useEffect, useRef, type ReactNode } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, type ReactNode } from 'react';
 import { ArrowUp, Bot, Check, Loader2, Square, User, X, Zap } from 'lucide-react';
 import { cn } from 'cn';
 import { Hint } from '@/components/Hint';
@@ -161,16 +161,26 @@ export function AiChatPanel<A>({
    */
   trailing?: ReactNode;
 }) {
-  const tail = useRef<HTMLDivElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
+  const atBottomRef = useRef(true);
   const { t } = useT();
 
-  // 新消息进来滚到底。依赖里带上最后一条的 id，避免只改 states 时也滚；
-  // 尾部插槽出现（如审批卡）同样要滚到底，否则要手翻才能看见
-  const lastId = messages[messages.length - 1]?.id;
-  const hasTrailing = trailing != null;
+  // 只滚动本面板；用户上翻时停止跟随，回到底部恢复，规则与首页一致。
+  const followBottom = useCallback(() => {
+    const el = scrollRef.current;
+    if (el && atBottomRef.current) el.scrollTop = el.scrollHeight;
+  }, []);
+  // 提交后立即跟随，避免上一帧的 scroll 事件把新增高度误判为用户上翻。
+  useLayoutEffect(followBottom, [followBottom, messages, trailing]);
   useEffect(() => {
-    tail.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
-  }, [lastId, messages.length, hasTrailing]);
+    const content = contentRef.current;
+    if (!content || typeof ResizeObserver === 'undefined') return;
+    // 图片加载、工具折叠展开也会改变高度，但不一定改变 messages 引用。
+    const observer = new ResizeObserver(followBottom);
+    observer.observe(content);
+    return () => observer.disconnect();
+  }, [followBottom]);
 
   const send = () => {
     if (draft.trim()) onSend();
@@ -178,7 +188,15 @@ export function AiChatPanel<A>({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="flex min-h-0 flex-1 flex-col gap-3.5 overflow-auto px-3.5 pt-3.5 pb-1">
+      <div
+        ref={scrollRef}
+        onScroll={() => {
+          const el = scrollRef.current;
+          if (el) atBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+        }}
+        className="flex min-h-0 flex-1 flex-col overflow-auto px-3.5 pt-3.5 pb-1"
+      >
+        <div ref={contentRef} className="flex shrink-0 flex-col gap-3.5">
         {messages.map((m) => {
           /* 本条消息仍待确认的提议序号：多于一条时给批量出口 */
           const pendingIdx = m.actions?.map((_, i) => i).filter((i) => (m.states?.[i] ?? 'pending') === 'pending') ?? [];
@@ -187,9 +205,14 @@ export function AiChatPanel<A>({
             <div className={cn('flex gap-2.5', m.role === 'user' && 'flex-row-reverse')}>
               <span
                 className="inline-flex size-6.5 flex-none items-center justify-center rounded-full text-white [&>svg]:size-3.5"
-                style={{ background: m.role === 'user' ? '#e5e7eb' : accent }}
+                style={{
+                  background: m.role === 'user' ? 'var(--secondary)' : accent,
+                  color: m.role === 'user'
+                    ? 'var(--secondary-foreground)'
+                    : accent === 'var(--primary)' ? 'var(--primary-foreground)' : '#fff',
+                }}
               >
-                {m.role === 'user' ? <User className="text-neutral-500" /> : <Bot />}
+                {m.role === 'user' ? <User /> : <Bot />}
               </span>
               {/* pre-wrap：剧本里是带换行的多行文本，得让它保留 */}
               <div className="flex min-w-0 max-w-[86%] flex-col">
@@ -209,7 +232,7 @@ export function AiChatPanel<A>({
                   <div
                     className={cn(
                       'text-foreground max-w-full rounded-xl px-3 py-2 text-[13px] leading-[21px] whitespace-pre-wrap',
-                      m.role === 'user' ? 'bg-secondary' : 'bg-muted',
+                      m.role === 'user' ? 'bg-secondary' : 'bg-card',
                     )}
                   >
                     {m.role === 'user' && !!m.images?.length && (
@@ -278,7 +301,8 @@ export function AiChatPanel<A>({
         })}
         {/* 尾部插槽（审批卡等）：跟在最新消息后面，输入框上方 */}
         {trailing}
-        <div ref={tail} />
+        <div />
+        </div>
       </div>
 
       {!!suggestions?.length && (

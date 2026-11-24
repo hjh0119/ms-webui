@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { memo, useEffect, useRef, useState, type ReactNode } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import ReactMarkdown from 'react-markdown';
 import { ArrowUp, Bot, ChevronRight, Columns2, FlaskConical, Globe, History, Loader2, Paperclip, Plus, ShieldAlert, SlidersHorizontal, Square, Terminal, Trash2, User, X } from 'lucide-react';
@@ -499,7 +499,7 @@ function ChatColumn({
                   <div
                     className={cn(
                       'text-foreground rounded-lg px-3.5 py-2.5 text-sm leading-[22px]',
-                      mine ? 'bg-primary/10' : 'bg-muted',
+                      mine ? 'bg-primary/10' : 'bg-card',
                     )}
                   >
                     {mine && m.images?.length ? (
@@ -600,51 +600,50 @@ function WakeEventCard({ text }: { text: string }) {
  * 模型输出注入片段也不会被执行。流式期间未闭合的加粗/标题会短暂
  * 显示字面符号——所有流式 markdown 产品共有的过渡态，不额外处理。
  */
-function MarkdownBody({ text }: { text: string }) {
+const markdownComponents: NonNullable<Parameters<typeof ReactMarkdown>[0]['components']> = {
+  h1: ({ children }) => <h1 className="text-[15px] font-semibold">{children}</h1>,
+  h2: ({ children }) => <h2 className="text-[14px] font-semibold">{children}</h2>,
+  h3: ({ children }) => <h3 className="text-sm font-semibold">{children}</h3>,
+  h4: ({ children }) => <h4 className="text-sm font-semibold">{children}</h4>,
+  pre: ({ children }) => (
+    <pre className="bg-muted overflow-auto rounded-lg p-3 font-mono text-xs leading-5">
+      {children}
+    </pre>
+  ),
+  code: ({ className, children }) =>
+    String(className).includes('language-') ? (
+      <code className="font-mono text-xs">{children}</code>
+    ) : (
+      <code className="bg-muted rounded px-1 py-0.5 font-mono text-[13px]">{children}</code>
+    ),
+  a: ({ href, children }) => (
+    <a href={href} target="_blank" rel="noreferrer" className="text-primary underline underline-offset-2">
+      {children}
+    </a>
+  ),
+  table: ({ children }) => (
+    <div className="overflow-auto">
+      <table className="border-border w-full border-collapse [&_td]:border-border [&_td]:border [&_td]:px-2 [&_td]:py-1 [&_th]:border-border [&_th]:bg-muted/50 [&_th]:border [&_th]:px-2 [&_th]:py-1">
+        {children}
+      </table>
+    </div>
+  ),
+  ul: ({ children }) => <ul className="list-disc ps-5">{children}</ul>,
+  ol: ({ children }) => <ol className="list-decimal ps-5">{children}</ol>,
+  blockquote: ({ children }) => (
+    <blockquote className="border-primary/40 text-muted-foreground border-s-2 ps-3">{children}</blockquote>
+  ),
+  hr: () => <hr className="border-border" />,
+};
+
+// 未改变的历史正文不重复解析；流式末条继续按 text 更新。
+const MarkdownBody = memo(function MarkdownBody({ text }: { text: string }) {
   return (
     <div className="flex flex-col gap-2">
-      <ReactMarkdown
-        components={{
-          h1: ({ children }) => <h1 className="text-[15px] font-semibold">{children}</h1>,
-          h2: ({ children }) => <h2 className="text-[14px] font-semibold">{children}</h2>,
-          h3: ({ children }) => <h3 className="text-sm font-semibold">{children}</h3>,
-          h4: ({ children }) => <h4 className="text-sm font-semibold">{children}</h4>,
-          pre: ({ children }) => (
-            <pre className="bg-muted overflow-auto rounded-lg p-3 font-mono text-xs leading-5">
-              {children}
-            </pre>
-          ),
-          code: ({ className, children }) =>
-            String(className).includes('language-') ? (
-              <code className="font-mono text-xs">{children}</code>
-            ) : (
-              <code className="bg-muted rounded px-1 py-0.5 font-mono text-[13px]">{children}</code>
-            ),
-          a: ({ href, children }) => (
-            <a href={href} target="_blank" rel="noreferrer" className="text-primary underline underline-offset-2">
-              {children}
-            </a>
-          ),
-          table: ({ children }) => (
-            <div className="overflow-auto">
-              <table className="border-border w-full border-collapse [&_td]:border-border [&_td]:border [&_td]:px-2 [&_td]:py-1 [&_th]:border-border [&_th]:bg-muted/50 [&_th]:border [&_th]:px-2 [&_th]:py-1">
-                {children}
-              </table>
-            </div>
-          ),
-          ul: ({ children }) => <ul className="list-disc ps-5">{children}</ul>,
-          ol: ({ children }) => <ol className="list-decimal ps-5">{children}</ol>,
-          blockquote: ({ children }) => (
-            <blockquote className="border-primary/40 text-muted-foreground border-s-2 ps-3">{children}</blockquote>
-          ),
-          hr: () => <hr className="border-border" />,
-        }}
-      >
-        {text}
-      </ReactMarkdown>
+      <ReactMarkdown components={markdownComponents}>{text}</ReactMarkdown>
     </div>
   );
-}
+});
 
 /** 相对时间：会话列表用「x 分钟前」这档粗粒度足够；t 由调用方传入 */
 function fmtAgo(at: number, t: (key: MessageKey, vars?: Record<string, string | number>) => string): string {

@@ -141,7 +141,7 @@ export function ConfigFormShell({
                 命令太长时折行看得见全部内容比拖横条更有用；要复制的是任务目录里
                 那份真的 run.sh，不是这段预览。
               */}
-              <div className="bg-muted text-foreground max-h-[420px] overflow-auto rounded-md p-3 font-mono text-xs leading-[19px] break-all whitespace-pre-wrap">
+              <div className="bg-muted/60 text-foreground max-h-[420px] overflow-auto rounded-md p-3 font-mono text-xs leading-[19px] break-all whitespace-pre-wrap">
                 {preview}
               </div>
               {extraArgs !== undefined && onExtraArgsChange && (

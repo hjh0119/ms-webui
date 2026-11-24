@@ -393,7 +393,7 @@ export function Panel({
   padded?: boolean;
 }) {
   return (
-    <div className="bg-card border-border overflow-hidden rounded-lg border">
+    <div className="bg-card border-border overflow-hidden rounded-lg border shadow-2xs">
       {title && (
         <div className="flex items-center justify-between gap-3 px-4 pt-3">
           <span className="text-foreground text-[13.5px] font-medium">{title}</span>

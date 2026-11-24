@@ -3,171 +3,89 @@
 
 @custom-variant dark (&:is(.dark *));
 
-/**
- * 皮肤 = tweakcn 的 Nature 的「纸」 + SWIFT logo 的「墨」。
- *
- * Nature 贡献的是无彩部分：暖米纸底 #f8f5f0、暖边框 #e0d6c9、radius 0.5rem。
- * 所有带彩的 token 一律取自 logo 那只鸟的渐变，色值是从图上采样来的，不是目测：
- *
- *     #4063a1  左端钢蓝  →  #3e4773  中段靛  →  #54447a  右端紫
- *
- * 所以 primary / ring / chart / sidebar / state-running 全部落在这条蓝紫轴上，
- * 界面和 logo 摆在一起不会像两套东西。
- *
- * 相对 Nature 原始预设的偏离，每条都是有代价才改的：
- *
- * 1. Nature 的绿整族换掉（原 primary #2e7d32、chart-1..5 全绿系、accent/secondary 浅绿）。
- *    绿是 Nature 的灵魂，但跟 SWIFT 的蓝紫不能共存，只能选一个。
- *    唯一留下来的一抹绿是 --state-done 用了 Nature 的 #2e7d32——「完成」是绿的，
- *    这个语义比配色一致性更硬。
- *
- * 2. 墨色从 Nature 的褐 #3e2723 换成偏冷的 #2b2438。
- *    褐字（暖）配蓝紫按钮（冷）会显脏。纸保留暖、墨跟着强调色走冷，
- *    读起来是「米纸上的靛墨」，这是个成立的组合。muted-foreground 同理：
- *    Nature 原值 #6d4c41 是褐的，换成 #655f78，顺带把对比度从 4.4:1 提到 4.9:1 过 AA。
- *
- * 3. font-sans 不采用 Nature 指定的 Montserrat / Merriweather / Source Code Pro。
- *    三个都要从 Google Fonts 下载，而这个 WebUI 会跑在没有外网的机器上；
- *    Montserrat 还没有中文字形，界面上大量中文会 fallback，字距字重全不对。
- *    想要那个调性得把字体文件放进仓库，那是另一笔体积账。
- *
- * 4. 端口与状态色（--port-* / --state-*）独立成一套，不受这条蓝紫轴管辖。
- *    这些颜色承载信息而不是装饰：编排画布靠色相区分十几种数据类型，
- *    为了「整体一致」把它们都拉成蓝紫，图就废了。装饰性的部分才需要克制。
- *
- * 5. 阴影用墨色 rgb(43 36 56) 而不是纯黑。Nature 没定义 shadow，走 tweakcn 默认的黑；
- *    但黑色阴影落在暖米纸上会发灰发脏，带一点紫的阴影才像纸的投影。
- *
- * 换皮只改这个文件的变量块。想整套换配色，去 tweakcn 调好把 CSS 粘进来即可，
- * 组件代码一行都不用动——前提是不要在组件里写死颜色。
+/* 中性灰工作区配 SWIFT logo 的蓝紫强调色；布局、字号、圆角保持原样。
+ * 彩色令牌仍来自 #4063a1 → #3e4773 → #54447a。
+ * 状态、图表与端口色保持各自语义；--titlebar 仍是独立深色画布/代码底。
+ * 此处保留冰蓝启动回退；Settings 的预设与自定义装饰色由 theme/palettes.ts 管理。
+ * 系统字栈支持离线使用。
  */
-
 :root {
-  /**
-   * Nature 原本 card 跟 background 同值（全平）。这里把 card / popover 各提亮一档：
-   * 我们的页面是卡片套卡片的结构，浮层还经常压在卡片上，同值的话边界只能靠边框读，
-   * 一旦浮层和底下的卡片重叠就糊成一片。
-   */
-  --background: #f8f5f0;
-  --foreground: #2b2438;
-  --card: #fdfbf7;
-  --card-foreground: #2b2438;
-  --popover: #fffdfa;
-  --popover-foreground: #2b2438;
+  /* 卡片比工作区提亮一档，浮层通过阴影与卡片分层。 */
+  --background: #f6f7f9;
+  --foreground: #252a36;
+  --card: #ffffff;
+  --card-foreground: #252a36;
+  --popover: #ffffff;
+  --popover-foreground: #252a36;
 
-  /* logo 渐变的中段。配白字 8.4:1，主按钮稳过 AA */
   --primary: #3e4773;
-  /* 不用纯白：纸是暖的，按钮上的字跟着用纸色才不割裂 */
   --primary-foreground: #f8f5f0;
-
-  /* 次级底色 = 纸染上一点主色，而不是中性灰，避免灰块在暖底上发脏 */
-  --secondary: #ebe7f1;
-  --secondary-foreground: #35305c;
-  --muted: #f0ebe4;
-  --muted-foreground: #655f78;
-  --accent: #ddd6ea;
-  --accent-foreground: #35305c;
+  /* 次级底色只带少量蓝紫，用于选择态，不染色整个工作区。 */
+  --secondary: #edf0f8;
+  --secondary-foreground: #353e5b;
+  --muted: #eef1f5;
+  --muted-foreground: #657084;
+  --accent: #e3e8f3;
+  --accent-foreground: #353e5b;
   --destructive: #c62828;
   --destructive-foreground: #fdfbf7;
-  --border: #e0d6c9;
-  --input: #e0d6c9;
-  /* 焦点环用 logo 的蓝端：比 primary 更跳，一眼能找到焦点在哪 */
+  --border: #dde2ea;
+  --input: #cbd3df;
   --ring: #4063a1;
 
-  /**
-   * 外壳（标题栏 + 侧栏）与内容区同轴浅色：侧栏用纸染深一档的 muted，
-   * 靠 border 与内容区分隔；激活项用主色馶蓝底，hover 用 accent。
-   * 全部复用内容区既有色值，外壳与工作区不再深浅割裂。
-   */
-  --sidebar: #f0ebe4;
-  --sidebar-foreground: #2b2438;
-  /* 激活项高亮：主色馶蓝底配纸色字（同 primary 的 8.4:1） */
+  /* 外壳与内容区同轴浅色，激活项保留主色靛蓝。 */
+  --sidebar: #eef1f5;
+  --sidebar-foreground: #252a36;
   --sidebar-primary: #3e4773;
   --sidebar-primary-foreground: #f8f5f0;
-  --sidebar-accent: #ddd6ea;
-  --sidebar-accent-foreground: #35305c;
-  --sidebar-border: #e0d6c9;
+  --sidebar-accent: #e3e8f3;
+  --sidebar-accent-foreground: #353e5b;
+  --sidebar-border: #dde2ea;
   --sidebar-ring: #4063a1;
-  /* 画布深底：workflow 编排页的画布与代码块仍用深底（彩端口线在深底上
-   * 才醒目），外壳改浅后这个色只剩画布消费，名字保留不改调用面 */
+  /* 彩色端口线仍以独立深色画布为底，不随外壳浅化。 */
   --titlebar: #181527;
-  /**
-   * tips 条的暖色点缀。浅色模式按纸色底选深金，深色模式在 .dark 块里
-   * 换回亮金——两套各自保证对比度。也是整套界面里唯一一处暖色强调，
-   * 压在冷紫轴上正好把提示条拎出来。
-   */
   --titlebar-accent: #8a6a1c;
 
-  /**
-   * 五条曲线全部落在 logo 的蓝紫轴上，靠明度和冷暖两头扩散来拉开区分度：
-   * 1 靛（主曲线，如 loss）、2 蓝、3 紫，这三个是采样值本身；
-   * 4 往冷侧扩到蓝青、5 往暖侧扩到亮紫。
-   *
-   * 代价要说清：同族五色的区分度不如彩虹色。雷达图上同时比五个 checkpoint 时
-   * 4 和 2 容易看混，那种场景要再加虚线样式区分，光靠颜色不够。
-   */
   --chart-1: #3e4773;
   --chart-2: #4063a1;
   --chart-3: #54447a;
   --chart-4: #2f6f8f;
   --chart-5: #8a5fa6;
 
-  /* Nature 的圆角。sm/md 走标准 calc，0.5rem 减 4px 仍是正值，不会算出负数 */
   --radius: 0.5rem;
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
   --radius-xl: calc(var(--radius) + 4px);
-  /**
-   * 偏离 5 的展开：阴影一律用墨色 rgb(43 36 56)，不用纯黑。
-   * 分档沿用 shadcn 的用法——静止元素（按钮、卡片、输入框）用 2xs~DEFAULT 这几档，
-   * 下拉用 md，弹窗用 lg，越浮的层影子越散。
-   */
-  --shadow-2xs: 0 1px 2px 0 rgb(43 36 56 / 0.04);
-  --shadow-xs: 0 1px 2px 0 rgb(43 36 56 / 0.05);
-  --shadow-sm: 0 1px 3px 0 rgb(43 36 56 / 0.08), 0 1px 2px -1px rgb(43 36 56 / 0.08);
-  --shadow: 0 1px 3px 0 rgb(43 36 56 / 0.09), 0 1px 2px -1px rgb(43 36 56 / 0.09);
-  --shadow-md: 0 2px 8px -2px rgb(43 36 56 / 0.12);
-  --shadow-lg: 0 8px 24px -6px rgb(43 36 56 / 0.16);
-  --shadow-xl: 0 12px 32px -8px rgb(43 36 56 / 0.18);
-  --shadow-2xl: 0 16px 48px -12px rgb(43 36 56 / 0.22);
+  /* 静态表面轻、浮层重，深色模式独立覆盖。 */
+  --shadow-2xs: 0 1px 2px rgb(25 35 55 / 0.025);
+  --shadow-xs: 0 1px 2px rgb(25 35 55 / 0.035);
+  --shadow-sm: 0 1px 3px rgb(25 35 55 / 0.055);
+  --shadow: 0 1px 4px rgb(25 35 55 / 0.065);
+  --shadow-md: 0 4px 16px -4px rgb(25 35 55 / 0.14);
+  --shadow-lg: 0 12px 36px -8px rgb(25 35 55 / 0.18);
+  --shadow-xl: 0 16px 44px -10px rgb(25 35 55 / 0.20);
+  --shadow-2xl: 0 20px 52px -12px rgb(25 35 55 / 0.24);
 
-  /* 偏离 3：等宽只给代码和数字，正文走带中文字形的字栈 */
   --font-sans: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB',
     'Microsoft YaHei', sans-serif;
   --font-mono: 'SF Mono', 'JetBrains Mono', Menlo, Consolas, 'Liberation Mono', monospace;
   --font-serif: var(--font-sans);
 
-  /**
-   * 偏离 4：任务与节点状态。四态对应 NodeStatus，全站共用一套，
-   * StatusTag、节点边框、连线动画都从这里取色。
-   *
-   * running 特意用了 logo 的蓝端（跟 --ring 同值）：正在跑的东西是界面的主角，
-   * 用品牌色标它既显眼又不额外引入一个色相。
-   * done 是全套里唯一留下的 Nature 原色 #2e7d32——「完成 = 绿」的语义比配色一致性硬。
-   */
+  /* 状态色承担运行语义，与装饰配色独立。 */
   --state-idle: #8a8397;
   --state-running: #4063a1;
   --state-done: #2e7d32;
   --state-failed: #c62828;
-  /**
-   * PAUSED 不能跟 idle 共用那个灰：灰读出来是「没跑过」，
-   * 而 PAUSED 是「显存还占着、可以继续」，这是得引人注意的状态。
-   */
   --state-paused: #a16207;
 
-  /**
-   * 编排画布的端口数据类型色。改这里等于改图例，NodeCanvas 不用动。
-   * 排布上让相邻语义的类型色相拉开，避免连线颜色撞在一起看不出走向。
-   * 这一组刻意不跟着蓝紫轴走，理由见文件头的偏离 4。
-   */
+  /* 端口色承担数据类型语义，不统一染成蓝紫。 */
   --port-model: #7c3aed;
   --port-data: #0e7490;
   --port-sampler: #0369a1;
   --port-traj: #b45309;
   --port-env: #15803d;
   --port-tool: #4d7c0f;
-  /* 中性端口用冷灰，Nature 那种暖褐灰放在蓝紫连线里会显脏 */
   --port-func: #5c5668;
   --port-reward: #c2410c;
   --port-adv: #a21caf;
@@ -180,47 +98,39 @@
 }
 
 .dark {
-  /**
-   * 深色模式把米纸换成墨色本身（带紫的黑，不是中性黑），
-   * 所以浅色模式下那个深紫外壳在这里只需再沉一档就能接上，混搭自然成立。
-   */
-  --background: #16141f;
-  --foreground: #ece9f2;
-  --card: #1d1a29;
-  --card-foreground: #ece9f2;
-  --popover: #221f31;
-  --popover-foreground: #ece9f2;
+  /* 中性蓝灰深底，靠表面明度区分外壳、内容与浮层。 */
+  --background: #141720;
+  --foreground: #e8edf6;
+  --card: #1b202c;
+  --card-foreground: #e8edf6;
+  --popover: #222938;
+  --popover-foreground: #e8edf6;
 
-  /* 深色下主按钮反过来：logo 蓝紫提亮做底，配深底色的字 */
   --primary: #9aa5db;
   --primary-foreground: #16141f;
-
-  --secondary: #2a2740;
-  --secondary-foreground: #ece9f2;
-  --muted: #221f2e;
-  --muted-foreground: #a49eb8;
-  --accent: #322d47;
-  --accent-foreground: #f4f2f8;
+  --secondary: #252e42;
+  --secondary-foreground: #e8edf6;
+  --muted: #202735;
+  --muted-foreground: #a5afc1;
+  --accent: #2c364a;
+  --accent-foreground: #f0f4fa;
   --destructive: #ef5350;
   --destructive-foreground: #1d1a29;
-  --border: #302b42;
-  --input: #3b3554;
+  --border: #30394a;
+  --input: #414d63;
   --ring: #6b78ad;
 
-  /* 外壳比内容区再沉，深色模式下层次方向跟浅色模式一致 */
-  --sidebar: #1a1728;
-  --sidebar-foreground: #ece9f2;
+  --sidebar: #181d28;
+  --sidebar-foreground: #e8edf6;
   --sidebar-primary: #b7c0e6;
   --sidebar-primary-foreground: #1e1b2e;
-  --sidebar-accent: #2b2740;
-  --sidebar-accent-foreground: #f4f2f8;
-  --sidebar-border: #322d47;
+  --sidebar-accent: #263146;
+  --sidebar-accent-foreground: #f0f4fa;
+  --sidebar-border: #30394a;
   --sidebar-ring: #6b78ad;
-  /* 深色模式外壳保持深；tips 金换回亮金（按深底选） */
   --titlebar-accent: #d9a825;
   --titlebar: #131020;
 
-  /* 同一条蓝紫轴，但把亮度整体提上来，否则深色底上五条线糊成一团 */
   --chart-1: #9aa5db;
   --chart-2: #7aa2e0;
   --chart-3: #b295d6;
@@ -248,6 +158,15 @@
   --port-ckpt: #2dd4bf;
   --port-report: #f0abfc;
   --port-endpoint: #34d399;
+
+  --shadow-2xs: 0 1px 2px rgb(0 0 0 / 0.08);
+  --shadow-xs: 0 1px 2px rgb(0 0 0 / 0.12);
+  --shadow-sm: 0 1px 3px rgb(0 0 0 / 0.16);
+  --shadow: 0 1px 4px rgb(0 0 0 / 0.18);
+  --shadow-md: 0 4px 16px -4px rgb(0 0 0 / 0.30);
+  --shadow-lg: 0 12px 36px -8px rgb(0 0 0 / 0.40);
+  --shadow-xl: 0 16px 44px -10px rgb(0 0 0 / 0.45);
+  --shadow-2xl: 0 20px 52px -12px rgb(0 0 0 / 0.50);
 }
 
 @theme inline {
@@ -303,11 +222,7 @@
   --radius-lg: var(--radius-lg);
   --radius-xl: var(--radius-xl);
 
-  /**
-   * 阴影也得在这里映一遍。只写在 :root 是不够的——Tailwind 的 shadow-* 工具类
-   * 读的是 @theme 里的 --shadow-*，不映射的话它会用自带的默认阴影（纯黑），
-   * 上面那套墨色阴影就完全不生效。
-   */
+  /* Tailwind 工具类从 @theme 读取阴影，映射到主题令牌。 */
   --shadow-2xs: var(--shadow-2xs);
   --shadow-xs: var(--shadow-xs);
   --shadow-sm: var(--shadow-sm);
@@ -335,17 +250,13 @@
     @apply bg-titlebar text-foreground font-sans antialiased;
   }
 
-  /* 数字等宽对齐：表格里的耗时、步数、指标跳动时不该让整行宽度抖 */
+  /* 数字等宽对齐，避免指标更新时宽度抖动。 */
   .tabular {
     font-variant-numeric: tabular-nums;
   }
 }
 
-/**
- * 滚动条。滑块跟着 --radius 走圆角，不写死像素值。
- * 颜色用 --muted-foreground 的透明叠加而不是写死灰值，深浅两套共用同一份规则；
- * 现在 muted-foreground 本身带一点紫，滑块也就自动落在同一个色系里。
- */
+/* 保留滚动条尺寸，仅用主题文字色透明叠加。 */
 ::-webkit-scrollbar {
   width: 8px;
   height: 8px;
@@ -361,21 +272,22 @@
   background: color-mix(in oklab, var(--muted-foreground) 60%, transparent);
 }
 
-/**
- * 列表行：不用卡片不用边框，hover 给一块很淡的底并露出操作按钮。
- * 这条留着是因为「操作按钮平时藏起来」用纯 Tailwind 要在每个按钮上挂
- * group-hover:opacity-100，行内有五六个按钮时噪音太大。
- */
 .task-row .row-actions {
   opacity: 0;
-  transition: opacity 0.15s ease;
+  transition: opacity 140ms ease;
 }
 .task-row:hover .row-actions,
 .task-row:focus-within .row-actions {
   opacity: 1;
 }
 
-/* 运行中状态点的呼吸 */
+/* 无 hover 的设备不能依赖鼠标悬停才能发现行操作。 */
+@media (hover: none), (pointer: coarse) {
+  .task-row .row-actions {
+    opacity: 1;
+  }
+}
+
 @keyframes pulseDot {
   0%,
   100% {
@@ -391,14 +303,32 @@
   animation: pulseDot 1.4s ease-in-out infinite;
 }
 
+/* 浮层保留既有动画方式，只统一时长和缓动，不影响 Radix 定位。 */
+:is([data-slot='select-content'], [data-slot='popover-content'],
+    [data-slot='dropdown-menu-content'], [data-slot='dropdown-menu-sub-content'],
+    [data-slot='dialog-content'], [data-slot='dialog-overlay'],
+    [data-slot='alert-dialog-content'], [data-slot='alert-dialog-overlay'],
+    [data-slot='sheet-content'], [data-slot='sheet-overlay'], [data-slot='tooltip-content']) {
+  animation-duration: 180ms;
+  animation-timing-function: cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
 @media (prefers-reduced-motion: reduce) {
-  /*
-    运行中连线的流动虚线是 React Flow 自带的（.animated 上的 dashdraw），
-    所以这里要点它的选择器——我们自己那个 .edge-flow 已经没有了。
-    它是库的样式，不写在这里就没有别的地方能按偏好关掉。
-  */
-  .status-dot-live,
-  .react-flow__edge.animated path {
-    animation: none;
+  *, *::before, *::after {
+    scroll-behavior: auto !important;
+  }
+  :is([data-slot='button'], [data-slot='input'], [data-slot='textarea'],
+      [data-slot='select-trigger'], [data-slot='tabs-trigger'], [data-slot='select-content'],
+      [data-slot='popover-content'], [data-slot='dropdown-menu-content'],
+      [data-slot='dropdown-menu-sub-content'], [data-slot='dialog-content'],
+      [data-slot='dialog-overlay'], [data-slot='alert-dialog-content'],
+      [data-slot='alert-dialog-overlay'], [data-slot='sheet-content'],
+      [data-slot='sheet-overlay'], [data-slot='tooltip-content']),
+  [data-slot='tabs-trigger']::after,
+  .task-row, .row-actions, .ui-tips-transition, .ui-chrome-button,
+  .animate-pulse, .animate-ping, .animate-spin,
+  .status-dot-live, .react-flow__edge.animated path, .react-flow__handle {
+    animation: none !important;
+    transition: none !important;
   }
 }

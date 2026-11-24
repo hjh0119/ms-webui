@@ -18,7 +18,7 @@ export function CodeBlock({ code, label }: { code: string; label?: string }) {
         whitespace-pre 而不是 pre-wrap：命令行示例折行之后就不能直接复制粘贴了，
         宁可横向滚动。
       */}
-      <pre className="bg-muted text-foreground overflow-x-auto rounded-md px-3.5 py-3 pr-9 font-mono text-[12.5px] leading-5 whitespace-pre">
+      <pre className="bg-muted/60 text-foreground overflow-x-auto rounded-md px-3.5 py-3 pr-9 font-mono text-[12.5px] leading-5 whitespace-pre">
         {code}
       </pre>
       <span className="absolute top-2.5 right-2.5">
@@ -37,7 +37,7 @@ export function CodeBlock({ code, label }: { code: string; label?: string }) {
  */
 export function CodeLine({ text, label }: { text: string; label?: string }) {
   return (
-    <div className="bg-muted text-foreground flex items-center gap-2.5 rounded-md px-3.5 py-2.5 font-mono text-[12.5px]">
+    <div className="bg-muted/60 text-foreground flex items-center gap-2.5 rounded-md px-3.5 py-2.5 font-mono text-[12.5px]">
       <span className="min-w-0 flex-1 truncate">{text}</span>
       <CopyButton text={text} label={label} />
     </div>
