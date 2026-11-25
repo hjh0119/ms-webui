@@ -5287,6 +5287,8 @@ function swiftApiPlugin(): Plugin {
         proc.stderr?.on('data', (buf: Buffer) => {
           stderrTail = (stderrTail + buf.toString('utf-8')).slice(-600);
         });
+        /* 子进程先死时 write 会 EPIPE：没有监听就是 uncaughtException，整个 dev server 挂掉。 */
+        proc.stdin?.on('error', () => { /* 交给 close 分支回错误 */ });
         proc.on('error', (error) => {
           if (inspectionProc === proc) inspectionProc = undefined;
           noteInspectionFailure(`模型检查进程异常：${error.message}`);
@@ -5309,7 +5311,9 @@ function swiftApiPlugin(): Plugin {
 
       async function requestModelInspection(body: any): Promise<any> {
         const proc = ensureInspectionProcess();
-        if (!proc.stdin || proc.exitCode !== null || proc.killed) throw new Error('模型检查进程不可写');
+        if (!proc.stdin || proc.stdin.destroyed || proc.exitCode !== null || proc.killed) {
+          throw new Error('模型检查进程不可写');
+        }
         const requestId = `inspect-${Date.now().toString(36)}-${++inspectionSeq}`;
         const detail = body?.detail === 'meta' ? 'meta' : 'config';
         const timeoutS = Math.min(120, Math.max(1, Number(body?.timeout_s) || (detail === 'meta' ? 90 : 60)));
@@ -5320,13 +5324,20 @@ function swiftApiPlugin(): Plugin {
             reject(new Error(`模型结构检查超时（${Math.ceil(timeoutS + graceS)}s）`));
           }, (timeoutS + graceS) * 1000);
           inspectionPending.set(requestId, { resolve, reject, timer });
-          proc.stdin!.write(JSON.stringify({
-            request_id: requestId,
-            node_id: String(body?.node_id ?? 'model'),
-            params: body?.params && typeof body.params === 'object' ? body.params : {},
-            detail,
-            timeout_s: timeoutS,
-          }) + '\n');
+          try {
+            proc.stdin!.write(JSON.stringify({
+              request_id: requestId,
+              node_id: String(body?.node_id ?? 'model'),
+              params: body?.params && typeof body.params === 'object' ? body.params : {},
+              detail,
+              timeout_s: timeoutS,
+            }) + '\n');
+          } catch (e) {
+            /* 同步写失败（流已销毁）：立刻收口，别留一个只能等超时的 pending。 */
+            inspectionPending.delete(requestId);
+            clearTimeout(timer);
+            reject(e instanceof Error ? e : new Error(String(e)));
+          }
         });
       }
 
