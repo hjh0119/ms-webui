@@ -5212,6 +5212,109 @@ function swiftApiPlugin(): Plugin {
         return null;
       }
 
+      interface PendingInspection {
+        resolve: (value: any) => void;
+        reject: (error: Error) => void;
+        timer: NodeJS.Timeout;
+      }
+
+      let inspectionProc: ChildProcess | undefined;
+      let inspectionReady = false;
+      let inspectionSeq = 0;
+      const inspectionPending = new Map<string, PendingInspection>();
+
+      function failInspections(message: string): void {
+        for (const pending of inspectionPending.values()) {
+          clearTimeout(pending.timer);
+          pending.reject(new Error(message));
+        }
+        inspectionPending.clear();
+      }
+
+      /* 结构预览只加载 Python 注册表，不启动 Ray、不规划或占用 GPU。 */
+      function ensureInspectionProcess(): ChildProcess {
+        if (inspectionProc && inspectionProc.exitCode === null && !inspectionProc.killed) return inspectionProc;
+        const proc = spawn(resolvePython(), ['-m', 'swift.dev.webui.inspection'], {
+          cwd: taskCwd(),
+          env: { ...spawnEnv(), USE_SWIFT_V5: '1' },
+          stdio: ['pipe', 'pipe', 'pipe'],
+        });
+        inspectionProc = proc;
+        inspectionReady = false;
+        const decoder = new StringDecoder('utf8');
+        let pending = '';
+        const consume = (text: string) => {
+          pending += text;
+          const lines = pending.split('\n');
+          pending = lines.pop() ?? '';
+          for (const line of lines) {
+            if (!line.startsWith('[model-inspection] ')) continue;
+            try {
+              const reply = JSON.parse(line.slice('[model-inspection] '.length));
+              if (reply.event === 'ready') {
+                inspectionReady = true;
+                continue;
+              }
+              const waiter = inspectionPending.get(String(reply.request_id));
+              if (!waiter) continue;
+              inspectionPending.delete(String(reply.request_id));
+              clearTimeout(waiter.timer);
+              inspectionReady = true;
+              if (reply.ok) waiter.resolve(reply.result);
+              else waiter.reject(new Error(String(reply.error ?? '模型结构检查失败')));
+            } catch {
+              /* 非协议输出不属于这个请求通道。 */
+            }
+          }
+        };
+        proc.stdout?.on('data', (buf: Buffer) => consume(decoder.write(buf)));
+        proc.stdout?.on('end', () => consume(decoder.end()));
+        proc.stderr?.resume();
+        proc.on('error', (error) => {
+          if (inspectionProc === proc) inspectionProc = undefined;
+          inspectionReady = false;
+          failInspections(`模型检查进程异常：${error.message}`);
+        });
+        proc.on('close', (code) => {
+          if (inspectionProc === proc) inspectionProc = undefined;
+          inspectionReady = false;
+          if (code !== 0) failInspections(`模型检查进程已退出（${code}）`);
+        });
+        return proc;
+      }
+
+      async function requestModelInspection(body: any): Promise<any> {
+        const proc = ensureInspectionProcess();
+        if (!proc.stdin || proc.exitCode !== null || proc.killed) throw new Error('模型检查进程不可写');
+        const requestId = `inspect-${Date.now().toString(36)}-${++inspectionSeq}`;
+        const detail = body?.detail === 'meta' ? 'meta' : 'config';
+        const timeoutS = Math.min(120, Math.max(1, Number(body?.timeout_s) || (detail === 'meta' ? 90 : 60)));
+        const graceS = inspectionReady ? 30 : 180;
+        return new Promise((resolve, reject) => {
+          const timer = setTimeout(() => {
+            inspectionPending.delete(requestId);
+            reject(new Error(`模型结构检查超时（${Math.ceil(timeoutS + graceS)}s）`));
+          }, (timeoutS + graceS) * 1000);
+          inspectionPending.set(requestId, { resolve, reject, timer });
+          proc.stdin!.write(JSON.stringify({
+            request_id: requestId,
+            node_id: String(body?.node_id ?? 'model'),
+            params: body?.params && typeof body.params === 'object' ? body.params : {},
+            detail,
+            ...(typeof body?.expand === 'string' && body.expand ? { expand: body.expand } : {}),
+            timeout_s: timeoutS,
+          }) + '\n');
+        });
+      }
+
+      server.httpServer?.on('close', () => {
+        inspectionProc?.kill();
+        inspectionProc = undefined;
+        inspectionReady = false;
+        failInspections('模型检查服务已停止');
+      });
+      ensureInspectionProcess();
+
       /* 编排实验 CRUD：脚手架是初始状态，实验本体持久在 ~/.swift/flows.json */
       server.middlewares.use('/api/flows', async (req, res) => {
         try {
@@ -5304,6 +5407,14 @@ function swiftApiPlugin(): Plugin {
           const url = new URL(req.url ?? '/', 'http://local');
           const segs = url.pathname.split('/').filter(Boolean);
           const seg0 = segs[0];
+
+          if (req.method === 'POST' && seg0 === 'inspect-model') {
+            const body = await readJsonBody(req);
+            const result = await requestModelInspection(body);
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify(result));
+            return;
+          }
 
           /* 会话日志：stdout 环形镜像 */
           if (req.method === 'GET' && seg0 && segs[1] === 'log') {
