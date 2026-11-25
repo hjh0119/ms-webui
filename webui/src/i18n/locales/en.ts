@@ -1299,6 +1299,7 @@ export const en: Partial<MessageTable> = {
   'wf.structUnknown': 'Not measured',
   'wf.structEmpty': 'No direct params',
   'wf.structExact': 'Exact measurement',
+  'wf.structRetry': 'Retry',
   'wf.structSafetensors': 'Exact from headers',
   'wf.structConfigEstimate': 'Config estimate',
   'wf.runningOutput': 'Running; output will appear here when done',

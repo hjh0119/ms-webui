@@ -81,7 +81,7 @@ function useInspectionNode(
         { label: 'train_type', value: tuner, ptype: 'str' },
         /* registry 的 backend 词表是 hf|megatron：UI 侧的 transformers 在这里折回 hf */
         { label: 'backend', value: backend === 'megatron' ? 'megatron' : 'hf', ptype: 'str' },
-        { label: 'parallel', value: JSON.stringify(parallel), ptype: 'dict' },
+        { label: 'parallel_spec', value: JSON.stringify(parallel), ptype: 'dict' },
         { label: 'model_config', value: JSON.stringify(modelConfig), ptype: 'dict' },
         { label: 'tuner_config', value: JSON.stringify(tunerConfig), ptype: 'dict' },
         { label: 'train_config', value: JSON.stringify(trainConfig), ptype: 'dict' },

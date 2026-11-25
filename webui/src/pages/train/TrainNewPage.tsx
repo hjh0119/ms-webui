@@ -40,6 +40,8 @@ import { useSettings } from '@/settings/SettingsContext';
  * 往日志行多打 key=value，这里补一项（或用户自由输入）即可上图。
  */
 const MODEL_PLACEHOLDER = 'Qwen/Qwen2.5-7B-Instruct';
+/** 并行规格缺省：复用同一个空对象，避免每次 render 打穿结构面板的 memo。 */
+const NO_PARALLEL = {};
 
 const WATCH_METRICS: Record<string, string[]> = {
   sft: ['loss', 'grad_norm', 'lr', 'accuracy'],
@@ -1309,7 +1311,7 @@ export function TrainNewPage() {
           params={params}
           extraArgs={extraArgs}
           backend={plan.backend}
-          parallel={plan.specs.model ?? {}}
+          parallel={plan.specs.model ?? NO_PARALLEL}
         />
       ) : undefined}
       fields={mode === 'code' ? [] : fields}

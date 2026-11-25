@@ -1300,6 +1300,7 @@ export const zh = {
   'wf.structUnknown': '待测算',
   'wf.structEmpty': '无直接参数',
   'wf.structExact': '精确测算',
+  'wf.structRetry': '重试',
   'wf.structSafetensors': '权重头精确',
   'wf.structConfigEstimate': 'config 估算',
   'wf.runningOutput': '正在跑，跑完这里会有输出',

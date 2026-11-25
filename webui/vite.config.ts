@@ -5221,7 +5221,17 @@ function swiftApiPlugin(): Plugin {
       let inspectionProc: ChildProcess | undefined;
       let inspectionReady = false;
       let inspectionSeq = 0;
+      /* 失败退避：进程起不来时按用户停顿节奏反复 spawn 一个要 import torch 的解释器会卡住 dev server。 */
+      let inspectionFailedAt = 0;
+      let inspectionFailure = '';
       const inspectionPending = new Map<string, PendingInspection>();
+
+      function noteInspectionFailure(message: string): void {
+        inspectionFailedAt = Date.now();
+        inspectionFailure = message;
+        inspectionReady = false;
+        failInspections(message);
+      }
 
       function failInspections(message: string): void {
         for (const pending of inspectionPending.values()) {
@@ -5234,6 +5244,8 @@ function swiftApiPlugin(): Plugin {
       /* 结构预览只加载 Python 注册表，不启动 Ray、不规划或占用 GPU。 */
       function ensureInspectionProcess(): ChildProcess {
         if (inspectionProc && inspectionProc.exitCode === null && !inspectionProc.killed) return inspectionProc;
+        if (inspectionFailedAt && Date.now() - inspectionFailedAt < 5000) throw new Error(inspectionFailure);
+        inspectionFailedAt = 0;
         const proc = spawn(resolvePython(), ['-m', 'swift.dev.webui.inspection'], {
           cwd: taskCwd(),
           env: { ...spawnEnv(), USE_SWIFT_V5: '1' },
@@ -5241,6 +5253,8 @@ function swiftApiPlugin(): Plugin {
         });
         inspectionProc = proc;
         inspectionReady = false;
+        /* 留住 stderr 尾巴：模块没装（老版 ms-swift）时只有这里能说清原因。 */
+        let stderrTail = '';
         const decoder = new StringDecoder('utf8');
         let pending = '';
         const consume = (text: string) => {
@@ -5260,6 +5274,7 @@ function swiftApiPlugin(): Plugin {
               inspectionPending.delete(String(reply.request_id));
               clearTimeout(waiter.timer);
               inspectionReady = true;
+              inspectionFailedAt = 0;
               if (reply.ok) waiter.resolve(reply.result);
               else waiter.reject(new Error(String(reply.error ?? '模型结构检查失败')));
             } catch {
@@ -5269,16 +5284,25 @@ function swiftApiPlugin(): Plugin {
         };
         proc.stdout?.on('data', (buf: Buffer) => consume(decoder.write(buf)));
         proc.stdout?.on('end', () => consume(decoder.end()));
-        proc.stderr?.resume();
+        proc.stderr?.on('data', (buf: Buffer) => {
+          stderrTail = (stderrTail + buf.toString('utf-8')).slice(-600);
+        });
         proc.on('error', (error) => {
           if (inspectionProc === proc) inspectionProc = undefined;
-          inspectionReady = false;
-          failInspections(`模型检查进程异常：${error.message}`);
+          noteInspectionFailure(`模型检查进程异常：${error.message}`);
         });
         proc.on('close', (code) => {
           if (inspectionProc === proc) inspectionProc = undefined;
-          inspectionReady = false;
-          if (code !== 0) failInspections(`模型检查进程已退出（${code}）`);
+          if (inspectionPending.size === 0) {
+            /* 空闲态自行退出（如被杀）只留退避，不必报给谁。 */
+            inspectionFailedAt = Date.now();
+            inspectionFailure = `模型检查进程已退出（${code}）`;
+            inspectionReady = false;
+            return;
+          }
+          const detail = stderrTail.trim().split('\n').filter(Boolean).slice(-3).join(' | ');
+          const reason = `模型检查进程已退出（${code}）`;
+          noteInspectionFailure(detail ? `${reason}：${detail}` : reason);
         });
         return proc;
       }
@@ -5301,7 +5325,6 @@ function swiftApiPlugin(): Plugin {
             node_id: String(body?.node_id ?? 'model'),
             params: body?.params && typeof body.params === 'object' ? body.params : {},
             detail,
-            ...(typeof body?.expand === 'string' && body.expand ? { expand: body.expand } : {}),
             timeout_s: timeoutS,
           }) + '\n');
         });
@@ -5313,7 +5336,6 @@ function swiftApiPlugin(): Plugin {
         inspectionReady = false;
         failInspections('模型检查服务已停止');
       });
-      ensureInspectionProcess();
 
       /* 编排实验 CRUD：脚手架是初始状态，实验本体持久在 ~/.swift/flows.json */
       server.middlewares.use('/api/flows', async (req, res) => {

@@ -95,11 +95,15 @@ function statusLabel(status: string | undefined, t: TFn): string {
 }
 
 function formatCount(value: number | undefined): string {
-  if (value === undefined || value === null) return '—';
+  if (value === undefined) return '—';
   if (value >= 1e9) return `${(value / 1e9).toFixed(2)}B`;
   if (value >= 1e6) return `${(value / 1e6).toFixed(2)}M`;
   if (value >= 1e3) return `${(value / 1e3).toFixed(1)}K`;
   return String(value);
+}
+
+function errorText(reason: unknown): string {
+  return reason instanceof Error ? reason.message : String(reason);
 }
 
 function partIcon(part: string) {
@@ -123,6 +127,9 @@ export function ModelStructurePanel({ node }: { node: GraphNode }) {
   const [loading, setLoading] = useState(true);
   const [measuring, setMeasuring] = useState(false);
   const [error, setError] = useState('');
+  /** structure 对应的声明键：meta 只对"配置档已经回来"的声明发起，避免改参数时白跑一次精确测算。 */
+  const [structureKey, setStructureKey] = useState('');
+  const [attempt, setAttempt] = useState(0);
   const [selectedId, setSelectedId] = useState('root');
   const [expanded, setExpanded] = useState<Set<string>>(new Set(['root']));
 
@@ -137,11 +144,12 @@ export function ModelStructurePanel({ node }: { node: GraphNode }) {
         .then((result) => {
           if (cancelled) return;
           setStructure(result);
+          setStructureKey(declarationKey);
           setSelectedId(result.nodes[0]?.id ?? 'root');
           setExpanded(new Set(result.nodes.filter((n) => !n.parent_id || n.parent_id === 'root').map((n) => n.id)));
         })
         .catch((reason) => {
-          if (!cancelled) setError(String(reason));
+          if (!cancelled) setError(errorText(reason));
         })
         .finally(() => {
           if (!cancelled) setLoading(false);
@@ -151,7 +159,7 @@ export function ModelStructurePanel({ node }: { node: GraphNode }) {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [declarationKey]);
+  }, [declarationKey, attempt]);
 
   useEffect(() => {
     if (!exact) {
@@ -159,6 +167,7 @@ export function ModelStructurePanel({ node }: { node: GraphNode }) {
       setMeasurement(undefined);
       return;
     }
+    if (structureKey !== declarationKey) return;
     let cancelled = false;
     setMeasuring(true);
     setError('');
@@ -168,7 +177,7 @@ export function ModelStructurePanel({ node }: { node: GraphNode }) {
       })
       .catch((reason) => {
         if (!cancelled) {
-          setError(String(reason));
+          setError(errorText(reason));
           setExact(false);
         }
       })
@@ -178,7 +187,7 @@ export function ModelStructurePanel({ node }: { node: GraphNode }) {
     return () => {
       cancelled = true;
     };
-  }, [declarationKey, exact]);
+  }, [declarationKey, exact, structureKey]);
 
   const byId = useMemo(() => new Map(structure?.nodes.map((n) => [n.id, n] as const)), [structure]);
   const selected = byId.get(selectedId) ?? structure?.nodes[0];
@@ -229,8 +238,14 @@ export function ModelStructurePanel({ node }: { node: GraphNode }) {
   return (
     <div className="flex min-h-0 flex-1 flex-col px-3 pt-3 pb-4">
       {error && (
-        <div className="border-destructive/30 bg-destructive/5 text-destructive mb-2 rounded-md border px-2.5 py-2 text-xs leading-5">
-          {error}
+        <div className="border-destructive/30 bg-destructive/5 text-destructive mb-2 flex items-start gap-2 rounded-md border px-2.5 py-2 text-xs leading-5">
+          <span className="min-w-0 flex-1 break-all">{error}</span>
+          <button
+            className="border-destructive/40 hover:bg-destructive/10 flex-none rounded border px-1.5 py-0.5"
+            onClick={() => setAttempt((n) => n + 1)}
+          >
+            {t('wf.structRetry')}
+          </button>
         </div>
       )}
       {!structure && loading && (
@@ -404,6 +419,15 @@ function TreeRow({
           onToggle={onToggle}
         />
       ))}
+      {/* 截断要明说：深模型一层可能有上百个子模块，静默吞掉会让人以为结构不全 */}
+      {open && children.length > 200 && (
+        <div
+          className="text-muted-foreground h-6 text-[10px] leading-6"
+          style={{ paddingLeft: `${Math.min(depth + 1, 8) * 12 + 4}px` }}
+        >
+          +{children.length - 200}
+        </div>
+      )}
     </>
   );
 }
